@@ -14,6 +14,7 @@ add_executable(tautq_unit
     unit/records_test.cc
     unit/wal_test.cc
     unit/submit_test.cc
+    unit/lease_test.cc
 )
 target_link_libraries(tautq_unit PRIVATE tautq_core tautq_test_warnings GTest::gtest_main)
 

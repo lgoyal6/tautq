@@ -119,6 +119,16 @@ struct Cluster {
             m->set(eps);
         }
     }
+    // Set every node's membership view to exactly these indices (scripted SWIM).
+    void set_membership(std::initializer_list<int> alive_idx) {
+        std::vector<taut::Endpoint> alive;
+        for (int i : alive_idx) {
+            alive.push_back(eps[static_cast<std::size_t>(i)]);
+        }
+        for (auto& m : mems) {
+            m->set(alive);
+        }
+    }
 
     // The node the ring says owns this key, given full membership.
     int ring_owner_index(const std::string& key) {

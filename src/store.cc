@@ -42,17 +42,27 @@ void JobStore::apply(const Record& r) {
         by_idem_[s->job.idem_key] = s->job.id;
         return;
     }
+    // Terminal-state rules: Done is absolute (nothing changes a Done job); DeadLetter
+    // yields only to Done (a late completion trumps parking). Necessary because Apply RPCs
+    // ride class 1 (reliable but UNORDERED) — a delayed Lease must not resurrect a job the
+    // owner already completed.
     if (const auto* rep = std::get_if<ReplicateRec>(&r)) {
-        // A replica copy. Never let an older-epoch copy clobber newer local state.
         auto it = jobs_.find(rep->job.id);
-        if (it == jobs_.end() || rep->job.epoch >= it->second.epoch) {
+        const bool keep_local =
+            it != jobs_.end() &&
+            (rep->job.epoch < it->second.epoch ||
+             (rep->job.epoch == it->second.epoch &&
+              (it->second.state == JobState::Done ||
+               (it->second.state == JobState::DeadLetter && rep->job.state != JobState::Done))));
+        if (!keep_local) {
             jobs_[rep->job.id] = rep->job;
         }
         by_idem_[rep->job.idem_key] = rep->job.id;
         return;
     }
     if (const auto* l = std::get_if<LeaseRec>(&r)) {
-        if (Job* j = find(l->id); j != nullptr && l->epoch >= j->epoch) {
+        if (Job* j = find(l->id); j != nullptr && l->epoch >= j->epoch &&
+                                  j->state != JobState::Done && j->state != JobState::DeadLetter) {
             j->state = JobState::Leased;
             j->epoch = l->epoch;
             j->lease_seq = l->lease_seq;
@@ -61,7 +71,8 @@ void JobStore::apply(const Record& r) {
         return;
     }
     if (const auto* d = std::get_if<DoneRec>(&r)) {
-        if (Job* j = find(d->id); j != nullptr && d->epoch >= j->epoch) {
+        if (Job* j = find(d->id);
+            j != nullptr && d->epoch >= j->epoch && j->state != JobState::Done) {
             j->state = JobState::Done;
             j->epoch = d->epoch;
             j->body.clear(); // completed jobs keep metadata, not payloads
@@ -77,7 +88,8 @@ void JobStore::apply(const Record& r) {
         return;
     }
     if (const auto* dl = std::get_if<DeadLetterRec>(&r)) {
-        if (Job* j = find(dl->id); j != nullptr && dl->epoch >= j->epoch) {
+        if (Job* j = find(dl->id);
+            j != nullptr && dl->epoch >= j->epoch && j->state != JobState::Done) {
             j->state = JobState::DeadLetter;
             j->epoch = dl->epoch;
         }

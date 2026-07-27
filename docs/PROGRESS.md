@@ -6,6 +6,39 @@ verified and how, slips stated plainly. Operating model unchanged from the taut 
 
 ---
 
+## M5 — leases, completion, expiry, dead-letter (2026-07-27)
+
+**Shipped (queue_node + store guards + Method::Apply):**
+- **Lease grant (§3's core line):** owner picks an owned Ready job (FIFO deque, lazy stale
+  drop, per-job backoff), and the LEASE record is **majority-committed before the worker
+  gets the grant** — local fsync + one replica Apply ack. A membership gate refuses to even
+  try when both replicas are dead (CP stall without burning `lease_seq`); a quorum failure
+  after local commit self-expires the lease (fence values intact) with backoff.
+- **Epoch fencing at replicas (`handle_apply`):** reject `epoch < known`, reject equal-epoch
+  records from a sender that isn't the job's recorded owner (a legitimate successor CLAIMs
+  first, M6). Records from a fenced stale owner cannot commit anywhere.
+- **Completion:** ack validates the exact `(epoch, lease_seq)` token; DONE is W=2 before the
+  worker hears OK; retried acks on Done answer OK only once replica copies are confirmed
+  (idempotent completion); **amnesty** for late acks on expired-but-not-re-leased jobs and
+  post-DeadLetter completions (completion trumps parking). Nack = immediate expire +
+  exponential backoff (1s·2^n cap 60s, in-memory).
+- **Expiry/DLQ:** in-memory visibility timers (re-armed conservatively `now+visibility` on
+  restart — log stays wall-clock-free); attempts == lease grants; grant that would exceed
+  `max_attempts` parks the job as DeadLetter (W=2).
+- **Reorder safety:** class-1 Apply RPCs are unordered, so `store.apply` got terminal-state
+  rules — Done is absolute; DeadLetter yields only to Done; Expire requires exact
+  `(epoch, lease_seq)` match. Deviation noted: quorum-failed lease attempts DO consume
+  `lease_seq` (conservative, never double-grants; gate+backoff keep it slow) — recorded in
+  DESIGN-protocol deviations.
+
+**Verified in Lima under ASan/UBSan: 38/38 ctest green** (7 new): grant→ack→Done replicated
+3/3 + idempotent re-ack; expiry→regrant with stale-token fencing (the no-double-completion
+test); late-ack amnesty; attempts→DeadLetter; nack backoff; **partitioned owner stalls with
+lease_seq unburned**; owner restart mid-lease → replayed lease honored, old token still
+completes. clang-format clean.
+
+---
+
 ## M4 — submit + replication: ring routing, W=2 quorum, dedup, repair (2026-07-27)
 
 **Shipped:**

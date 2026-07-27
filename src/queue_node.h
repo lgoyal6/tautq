@@ -65,6 +65,36 @@ class QueueNode {
     // unreachable (dedup degrades to best-effort; duplicates still share the idem key).
     void submit(SubmitParams p, SubmitCb cb);
 
+    // What a worker receives with a granted lease: the job to execute plus the fencing
+    // token (epoch, lease_seq) it must present on completion.
+    struct LeaseGrant {
+        JobId id{};
+        std::string url;
+        std::vector<std::byte> body;
+        std::string idem_key;
+        std::uint32_t epoch = 0;
+        std::uint32_t lease_seq = 0;
+        std::uint32_t visibility_ms = 0;
+        std::uint32_t attempt = 0;
+    };
+    using LeaseCb = std::function<void(std::uint32_t status, const LeaseGrant& grant)>;
+    using AckCb = std::function<void(std::uint32_t status)>;
+
+    // Grant one owned Ready job to a worker. The LEASE record is majority-committed (local
+    // fsync + one replica ack) BEFORE the grant is handed out — the line that makes
+    // double-leasing across epochs impossible (§3). kNoJob when nothing is leasable;
+    // kNoQuorum when replicas are unreachable (the job is returned to Ready, backoff
+    // applied — a partitioned owner must stall rather than grant, and the membership gate
+    // keeps repeated quorum failures from burning a job's attempts).
+    void lease(std::uint64_t worker_id, LeaseCb cb);
+
+    // Worker completion (success) or delivery failure (success=false -> immediate expire +
+    // exponential backoff). Success commits DONE at W=2 before the worker hears OK; retried
+    // acks on an already-Done job answer OK once the DONE copies are confirmed (idempotent
+    // completion). Late acks whose lease expired but whose job was never re-leased are
+    // accepted (amnesty) — discarding finished work only forces a duplicate delivery.
+    void ack(const JobId& id, std::uint32_t epoch, std::uint32_t lease_seq, bool success, AckCb cb);
+
     // SWIM wiring (M6 expands this into takeover checks).
     void on_peer_dead(const taut::Endpoint& peer);
 
@@ -92,10 +122,24 @@ class QueueNode {
     void owner_submit(SubmitParams p, SubmitCb cb);
     void handle_fwd_submit(const RpcNode::ReqCtx& ctx, taut::ByteSpan body);
     void handle_replicate(const RpcNode::ReqCtx& ctx, taut::ByteSpan body);
+    void handle_apply(const RpcNode::ReqCtx& ctx, taut::ByteSpan body);
+    void handle_fwd_ack(const RpcNode::ReqCtx& ctx, taut::ByteSpan body);
     void start_replication(const JobId& id, bool track_quorum, SubmitCb cb);
     void send_replicate(const JobId& id, std::size_t slot);
     void repair_tick(TimePoint now);
+    void expiry_tick(TimePoint now);
     void submit_result(const JobId& id, std::uint32_t st);
+
+    void owner_ack(const JobId& id, std::uint32_t epoch, std::uint32_t lease_seq, bool success,
+                   AckCb cb);
+    // Local fsync'd commit followed by Apply RPCs to both replicas; done(true) after one
+    // replica ack (W=2 counting self). Also refreshes the repair mask pessimistically so
+    // stragglers converge via the full-copy repair loop.
+    void quorum_commit(const JobId& id, const Record& rec, std::function<void(bool)> done);
+    void mark_replica_ok(const JobId& id, std::size_t slot);
+    bool replicas_reachable(const Job& j) const;
+    void requeue_ready(const JobId& id, TimePoint not_before);
+    std::chrono::milliseconds nack_backoff(std::uint32_t attempt) const;
 
     static std::vector<std::byte> encode_params(const SubmitParams& p);
     static bool decode_params(taut::ByteSpan in, SubmitParams& p);
@@ -117,6 +161,11 @@ class QueueNode {
     // Rebuilt pessimistically (all unconfirmed) after restart; re-replication is idempotent.
     std::unordered_map<JobId, std::uint8_t, JobIdHash> repair_;
     TimePoint next_repair_{};
+
+    // Owner-side lease machinery — all in-memory, never logged (job.h explains why):
+    std::deque<JobId> ready_;                                        // leasable, FIFO-ish
+    std::unordered_map<JobId, TimePoint, JobIdHash> lease_deadline_; // visibility timers
+    std::unordered_map<JobId, TimePoint, JobIdHash> not_before_;     // nack/quorum backoff
 };
 
 } // namespace tautq
