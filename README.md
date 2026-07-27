@@ -88,11 +88,44 @@ the cluster's own submit→DONE histograms, quantiles from scrape deltas). Repro
 
 ### Sustained-rate ramp (knee point)
 
-RAMP_TABLE_PLACEHOLDER
+5-node netns cluster (shared 4-core VM), 20 s per step, `bench/ramp.csv`:
+
+| offered rate | accepted | completed | p50 | p95 | p99 |
+|---:|---:|---:|---:|---:|---:|
+| 100/s | 2000/2000 | all | 29 ms | 60 ms | 63 ms |
+| 200/s | 4000/4000 | all | 28 ms | 61 ms | 64 ms |
+| 400/s | 8000/8000 | all | 26 ms | 60 ms | 63 ms |
+| 600/s | 12000/12000 | all | 28 ms | 60 ms | 63 ms |
+| **800/s** | 16000/16000 | all | 30 ms | 62 ms | **107 ms** |
+| 1000+/s | — | — | — | — | *overload collapse* |
+
+**The knee is at ~800 jobs/s**: p99 leaves its flat ~63 ms band (the worker poll interval
+plus delivery + two majority commits) and rises to 107 ms. Beyond ~1000/s the cluster does
+not degrade gracefully — nodes become intermittently unresponsive (submits and scrapes
+time out) and recover only when load drops; those rows are in the CSV, flagged suspect,
+deliberately unpublished. The arithmetic says why: each job costs ~9 fsyncs cluster-wide
+(SUBMIT/LEASE/DONE on the owner + their replica appends), ≈1.4k fsync/s per node at
+800/s — the single-threaded fsync-per-commit design saturates. Group commit
+(`Wal::append(sync=false)` + batched `sync()` already exist) is the known next step, not
+yet implemented; overload admission control likewise.
 
 ### Throughput and p99 vs. packet loss
 
-LOSS_TABLE_PLACEHOLDER
+Fixed 200/s (well under the knee) so loss effects are isolated; loss injected on every
+node's UDP ingress; `bench/loss_matrix.csv`:
+
+| UDP loss | accepted | completed | p50 | p95 | p99 |
+|---:|---:|---:|---:|---:|---:|
+| 0 % | 4000/4000 | all | 27 ms | 60 ms | 63 ms |
+| 1 % | 4000/4000 | all | 27 ms | 62 ms | 116 ms |
+| 5 % | 4000/4000 | all | 27 ms | 61 ms | 74 ms |
+| 10 % | 4000/4000 | all | 30 ms | 79 ms | 127 ms |
+| 20 % | 3992/3992 | all | 65 ms | 633 ms | 1019 ms |
+
+Full throughput is sustained at every loss level — taut's 25 ms retransmit floor keeps the
+cluster plane tight (p50 only 2.4× worse at 20 % loss). Tail caveats: single 20 s runs, so
+the p99 column is noisy in the tail (the 1 % row's p99 landing above the 5 % row's is
+sampling noise, not physics).
 
 ## Running it
 

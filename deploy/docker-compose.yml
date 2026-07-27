@@ -8,8 +8,10 @@
 
 x-node: &node
   build:
-    context: ../..
-    dockerfile: tautq/deploy/Dockerfile
+    context: ..
+    dockerfile: deploy/Dockerfile
+    additional_contexts:
+      taut: ../../taut # the sibling checkout tautq vendors
   cap_add: [NET_ADMIN]
   networks:
     tautq: {}

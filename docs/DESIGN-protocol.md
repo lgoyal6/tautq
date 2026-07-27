@@ -96,3 +96,27 @@ which is exactly the contract real webhook providers (Stripe/GitHub) publish.
 - RPCs (REPLICATE/CLAIM/DONE/RESYNC-digest) ride class 1 (reliable-unordered, no head-of-line
   blocking); RESYNC state transfer rides class 2 framed. SWIM runs unchanged on its own socket.
 - On SWIM Dead(peer): abandon in-flight RPCs to it and tear down its Session.
+
+## Deviations and refinements discovered during implementation (dated notes)
+
+- **(M5, 2026-07-27) Quorum-failed lease attempts consume `lease_seq`.** A lease is
+  committed locally before its replica quorum; on quorum failure it is self-expired with
+  the fence values intact. Conservative in the safe direction (can never double-grant),
+  but repeated quorum failures could burn a job's attempts — mitigated by the membership
+  gate (an owner that can see no replica alive refuses to try) plus per-job backoff.
+- **(M5) EXPIRE and DEAD_LETTER replicate asynchronously** (not W=2-blocking like
+  SUBMIT/LEASE/DONE): ack fencing is by exact `(epoch, lease_seq)` match, so a replica
+  with stale lease knowledge cannot cause an incorrect acceptance, and takeover re-arms
+  deadlines conservatively. The full-copy repair loop converges stragglers.
+- **(M6) Takeover commits locally BEFORE collecting claim acks.** An unconfirmed local
+  takeover is provably harmless — acting on ownership means committing leases/completions,
+  and those are quorum-fenced. This avoids a claim-retry livelock without adding an epoch
+  reservation protocol.
+- **(M6) `current_lease` keys on `lease_seq`, with `token.epoch <= job.epoch`:** the seq is
+  monotone per job across epochs (successors inherit the max committed seq via the
+  claim/lease majority intersection), so an old-epoch token with the current seq is the
+  inherited lease, and its worker's completion is accepted.
+- **(M9) Fallback twins are a verified, attributed case:** under loss, a forwarded submit
+  whose response is lost triggers the §2 local-ownership fallback and two jobs can share
+  one idempotency key. The chaos verifier attributes such duplicates explicitly
+  (`fallback_twins`) so "zero unexplained duplicates" stays a tight assertion.

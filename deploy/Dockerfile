@@ -1,10 +1,10 @@
-# Build context is the PARENT directory holding both checkouts side by side (taut/ and
-# tautq/) — tautq vendors taut from its sibling path. docker-compose.yml sets this up.
+# Build context is the tautq repo; the sibling taut checkout arrives as the named build
+# context "taut" (compose sets both up — see docker-compose.yml).
 FROM ubuntu:24.04 AS build
 RUN apt-get update && apt-get install -y --no-install-recommends \
     clang cmake ninja-build git ca-certificates && rm -rf /var/lib/apt/lists/*
-COPY taut /src/taut
-COPY tautq /src/tautq
+COPY --from=taut / /src/taut
+COPY . /src/tautq
 WORKDIR /src/tautq
 RUN cmake --preset release -DTAUTQ_BUILD_TESTS=OFF && cmake --build --preset release
 

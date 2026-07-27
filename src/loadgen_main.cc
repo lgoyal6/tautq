@@ -34,10 +34,14 @@ struct Hist {
 };
 
 // Parse the tautq histogram + completion counter out of one /metrics payload.
-Hist scrape(const std::string& base) {
+Hist scrape(const std::string& base, int* unreachable = nullptr) {
     Hist h;
     const auto r = tautq::http_fetch("GET", base + "/metrics", {}, "", 3000ms);
     if (r.code != 200) {
+        if (unreachable != nullptr) {
+            ++*unreachable;
+        }
+        std::fprintf(stderr, "loadgen: scrape failed for %s (code %d)\n", base.c_str(), r.code);
         return h;
     }
     std::size_t pos = 0;
@@ -65,10 +69,10 @@ Hist scrape(const std::string& base) {
     return h;
 }
 
-Hist sum_scrapes(const std::vector<std::string>& gateways) {
+Hist sum_scrapes(const std::vector<std::string>& gateways, int* unreachable = nullptr) {
     Hist total;
     for (const auto& g : gateways) {
-        const Hist h = scrape(g);
+        const Hist h = scrape(g, unreachable);
         for (const auto& [le, c] : h.buckets) {
             total.buckets[le] += c;
         }
@@ -76,6 +80,16 @@ Hist sum_scrapes(const std::vector<std::string>& gateways) {
         total.completions += h.completions;
     }
     return total;
+}
+
+// Counters are per-process: a node that died or restarted between the two scrapes makes
+// after < before. Clamp to zero and SAY SO — a silent u64 underflow poisons the row.
+std::uint64_t delta_or_zero(std::uint64_t after, std::uint64_t before, bool* clamped) {
+    if (after < before) {
+        *clamped = true;
+        return 0;
+    }
+    return after - before;
 }
 
 // Quantile from a cumulative-bucket delta, with linear interpolation inside the bucket
@@ -190,18 +204,28 @@ int main(int argc, char** argv) {
 
     // Let in-flight jobs complete before the closing scrape.
     const auto settle_deadline = Clock::now() + 30s;
-    Hist after = sum_scrapes(gateways);
-    while (Clock::now() < settle_deadline && after.count - before.count < accepted.load()) {
+    int unreachable = 0;
+    Hist after = sum_scrapes(gateways, &unreachable);
+    while (Clock::now() < settle_deadline && after.count >= before.count &&
+           after.count - before.count < accepted.load()) {
         std::this_thread::sleep_for(1s);
-        after = sum_scrapes(gateways);
+        unreachable = 0;
+        after = sum_scrapes(gateways, &unreachable);
     }
 
+    bool clamped = false;
     std::map<double, std::uint64_t> delta;
     for (const auto& [le, c] : after.buckets) {
         const auto bit = before.buckets.find(le);
-        delta[le] = c - (bit == before.buckets.end() ? 0 : bit->second);
+        delta[le] = delta_or_zero(c, bit == before.buckets.end() ? 0 : bit->second, &clamped);
     }
-    const std::uint64_t completed = after.count - before.count;
+    const std::uint64_t completed = delta_or_zero(after.count, before.count, &clamped);
+    if (clamped || unreachable > 0) {
+        std::fprintf(stderr,
+                     "loadgen: WARNING row is suspect — counter reset (node died/restarted?) "
+                     "or %d unreachable node(s); do not publish this row\n",
+                     unreachable);
+    }
     std::printf("%d,%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%.1f,%.1f,%.1f\n", rate,
                 offered.load(), accepted.load(), errors.load(), completed,
                 quantile_ms(delta, completed, 0.50), quantile_ms(delta, completed, 0.95),

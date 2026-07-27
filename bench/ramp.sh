@@ -31,6 +31,16 @@ for rate in ${RATES[@]}; do
     sleep 3
 done
 
+for i in 0 1 2 3 4; do
+    if ! curl -fsS -m 2 "http://10.77.0.1$i:8080/healthz" >/dev/null 2>&1; then
+        echo "WARNING: node $i unhealthy at end of ramp — evidence kept in $run" >&2
+        KEEP=1
+    fi
+done
 bash $CL down >/dev/null 2>&1
-sudo rm -rf "$run"
+if [ "${KEEP:-0}" = "1" ]; then
+    echo "evidence: $run" >&2
+else
+    sudo rm -rf "$run"
+fi
 echo "wrote $OUT" >&2

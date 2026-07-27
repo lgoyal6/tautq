@@ -6,6 +6,41 @@ verified and how, slips stated plainly. Operating model unchanged from the taut 
 
 ---
 
+## M10 + FINAL STATUS — v0.1.0 complete (2026-07-27)
+
+**All ten modules shipped in one day-long agentic run (M2–M10), every module verified
+before the next was built.** 48/48 unit/protocol tests (ASan/UBSan, deterministic SimNet),
+chaos matrix 4/4 in both dev and release builds, 3-node smoke, full docker-compose stack
+validated end-to-end (submit → SWIM-converged 5 nodes → worker → sink receipt; Prometheus
+ready; Grafana healthy).
+
+**Load results (committed CSVs in bench/):**
+- **Knee at ~800 jobs/s** on a shared 4-core VM: 16,000/16,000 jobs accepted+completed in
+  20 s at p50 30 ms / p99 107 ms; p99 stays ~63 ms through 600/s. Beyond ~1000/s the
+  single-threaded fsync-per-commit path saturates (~9 fsyncs/job cluster-wide) and nodes
+  wedge until load drops — rows kept in the CSV flagged suspect, NOT published as capacity.
+  Group commit is the sanctioned next step (Wal API already supports it), not implemented.
+- **Loss matrix at 200/s:** full throughput at every level 0–20%; p99 63 → 1019 ms,
+  p50 only 27 → 65 ms (taut's 25 ms RTO floor earning its keep).
+- Loadgen hardening from the first bad run: counter-reset clamping + unreachable-node
+  detection so a suspect row can never be published silently.
+
+**The acceptance-criteria answers:**
+- jobs/sec: **800/s sustained (5-node cluster), knee published with mechanism analysis.**
+- p99 under sustained load: **107 ms at the knee; 63 ms in the flat region.**
+- Failure the chaos suite caught that was then fixed: **the partition scenario proved
+  taut's SWIM never reconverges after a healed partition once Dead verdicts land (8 jobs
+  stalled forever); fixed as taut v0.1.2 (post-Dead refutation channel) and now covered by
+  a taut regression test.** Runner-ups, all real: SWIM terminal-Dead blocking restarts
+  (v0.1.1, caught at feasibility), an ASan-caught HTTP use-after-free, and the verifier
+  learning to attribute fallback twins.
+
+**Still open / honest debts:** first GitHub push validates CI runner-side; taut must be
+public (or a PAT secret added) for tautq CI checkout; log compaction, group commit,
+overload admission control, >640 B payloads all documented as not-yet.
+
+---
+
 ## M9 — CI: chaos on every PR (2026-07-27)
 
 **Shipped:** `.github/workflows/ci.yml` — build+ctest matrix {dev (ASan/UBSan), release},
