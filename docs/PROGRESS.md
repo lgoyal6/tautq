@@ -6,6 +6,27 @@ verified and how, slips stated plainly. Operating model unchanged from the taut 
 
 ---
 
+## M3 — job model, record serde, append-only WAL (2026-07-27)
+
+**Shipped:**
+- `job.h` — Job model + JobId (`origin ekey + boot_id/seq nonce`: unique with zero
+  coordination, hex form for HTTP). Design point: lease deadlines never hit the log — replay
+  is time-independent; a restarted/taking-over node re-arms `now + visibility` conservatively.
+- `records.{h,cc}` — the 7 record types (Submit/Replicate carry the full job; Lease/Done/
+  Expire carry the `(epoch, lease_seq)` fence; DeadLetter/Takeover) as a `std::variant`,
+  strict bounded decode. Same bytes travel in Replicate RPCs and land in replica logs.
+- `wal.{h,cc}` — hand-written segmented WAL: `u32 len | u32 crc32c | body` frames (CRC is
+  `taut::crc32c`), fsync-on-commit + separate `sync()` for future group commit, segment
+  rotation with directory fsync, replay with torn-tail truncation (short OR bad-CRC tail);
+  corruption before the tail fails open() — that is replication's job to repair, stated.
+
+**Verified in Lima under ASan/UBSan: 25/25 ctest green** (11 new), incl. torn-tail
+(mid-record truncate → clean replay → appends land where the tear was), corrupt-tail CRC,
+rotation with 64-byte segments (20 records, order preserved across files), job serde
+rejecting every truncated prefix. clang-format clean.
+
+---
+
 ## M2 — node skeleton: demux, boot_id HELLO, RPC layer (2026-07-27)
 
 **Shipped:** build skeleton (CMake mirroring taut's presets/warnings/sanitizers; vendored

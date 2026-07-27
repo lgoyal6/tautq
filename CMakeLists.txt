@@ -27,6 +27,8 @@ add_library(tautq_core STATIC
     src/wire.cc
     src/demux.cc
     src/rpc.cc
+    src/records.cc
+    src/wal.cc
 )
 target_include_directories(tautq_core PUBLIC src)
 target_compile_features(tautq_core PUBLIC cxx_std_20)
