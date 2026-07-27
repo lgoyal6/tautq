@@ -1,5 +1,7 @@
 # tautq
 
+[![ci](https://github.com/lgoyal6/tautq/actions/workflows/ci.yml/badge.svg)](https://github.com/lgoyal6/tautq/actions/workflows/ci.yml)
+
 A distributed webhook-delivery service — five nodes, **no coordinator** — built on
 [taut](../taut), a reliable-UDP transport + SWIM membership library written from scratch.
 
@@ -88,7 +90,10 @@ the cluster's own submit→DONE histograms, quantiles from scrape deltas). Repro
 
 ### Sustained-rate ramp (knee point)
 
-5-node netns cluster (shared 4-core VM), 20 s per step, `bench/ramp.csv`:
+![latency vs offered rate](bench/ramp.png)
+
+5-node netns cluster (shared 4-core VM), 20 s per step, `bench/ramp.csv`
+(plots regenerate via `python3 bench/plot.py`):
 
 | offered rate | accepted | completed | p50 | p95 | p99 |
 |---:|---:|---:|---:|---:|---:|
@@ -110,6 +115,8 @@ deliberately unpublished. The arithmetic says why: each job costs ~9 fsyncs clus
 yet implemented; overload admission control likewise.
 
 ### Throughput and p99 vs. packet loss
+
+![latency vs packet loss](bench/loss_matrix.png)
 
 Fixed 200/s (well under the knee) so loss effects are isolated; loss injected on every
 node's UDP ingress; `bench/loss_matrix.csv`:
