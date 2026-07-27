@@ -1,0 +1,49 @@
+# tautq — PROGRESS
+
+State log, newest at top. Same conventions as taut/docs/PROGRESS.md: what shipped, what was
+verified and how, slips stated plainly. Operating model unchanged from the taut amendment
+(2026-07-20): Claude implements + functionally verifies; Laksh directs design and commits.
+
+---
+
+## M2 — node skeleton: demux, boot_id HELLO, RPC layer (2026-07-27)
+
+**Shipped:** build skeleton (CMake mirroring taut's presets/warnings/sanitizers; vendored
+taut via `TAUTQ_TAUT_DIR` + `add_subdirectory`, sanitizer flags applied top-level so the
+library is instrumented consistently) and the three transport-integration pieces:
+- `wire.{h,cc}` — HELLO datagrams (non-taut magic `TQH`, boot_id + echoed-boot acks so a
+  stale ack can't complete a new handshake) and the 14-byte RPC envelope
+  (kind/method/req_id/status); `Method` space reserved for all later modules.
+- `demux.{h,cc}` — one data socket per node → per-peer `PeerView` facades feeding per-peer
+  `taut::Session`s; HELLOs split off before any session sees them; taut traffic from
+  un-handshaked peers → `on_stranger` (never fed to a session); bounded per-peer inboxes.
+- `rpc.{h,cc}` — request/response over class-1 sessions: HELLO handshake state machine
+  (create-session-on-establish, teardown+fail-calls on boot_id change or SWIM `peer_dead`,
+  rate-limited HELLO to strangers so a restarted node's counterpart re-handshakes), req_id
+  matching, per-call deadlines, kTimeout/kPeerDown/kTooLarge/kBusy synthesized locally.
+
+**Verified in Lima under ASan/UBSan: 14/14 ctest green**, incl.
+`Rpc.PeerRestartFailsInflightThenRecovers` (kill+replace B mid-call: in-flight call fails
+kPeerDown via the new incarnation's HELLO, next call succeeds after auto re-handshake) and
+`Rpc.HandshakeAndCallsSurviveHeavyLoss` (20% loss). clang-format clean.
+
+**Build snag (fixed):** taut's `include(Warnings)` resolved to tautq's module of the same
+name via inherited `CMAKE_MODULE_PATH` — tautq now includes its cmake helpers by full path.
+
+---
+
+## S0 — protocol approved, repo scaffolded, taut v0.1.1 prerequisite shipped (2026-07-27)
+
+- **Protocol approved by Laksh** (lease + replication; see docs/DESIGN-protocol.md and
+  DECISIONS.md D1–D8). Workload framing: distributed webhook delivery service.
+- **taut v0.1.1 shipped in the taut repo** (prerequisite found during feasibility): SWIM
+  rejoin — lexicographic (incarnation, state) precedence so Alive@k+1 resurrects Dead@k, JOIN
+  reply marking to kill an infinite JOIN ping-pong. 57/57 tests green in Lima (ASan/UBSan),
+  3 new SWIM tests. Recorded there as D26 + DESIGN-swim.md "Rejoin".
+- **Open items before CI lands:** taut public vs. PAT for vendoring (D8); Lima mount covers
+  ~/tautq (builds of tautq happen in the Linux VM / containers).
+
+**Next (module order):** node skeleton — demux transport, boot_id HELLO session reset,
+class-1 RPC layer with request ids + SWIM-driven abandon. Then: log+replay → submit/replicate
+→ lease/ack/expiry → failover/TAKEOVER/RESYNC → HTTP admin + metrics → compose + chaos → CI
+→ load test + README.
