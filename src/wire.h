@@ -52,14 +52,15 @@ enum class MsgKind : std::uint8_t { Request = 1, Response = 2 };
 
 // Method space for the whole protocol (DESIGN-protocol §3/§6); later modules claim theirs.
 enum class Method : std::uint8_t {
-    Ping = 1,      // liveness/testing echo
-    FwdSubmit = 2, // gateway -> owner: submit on behalf of a client
-    Replicate = 3, // owner -> replica: append a replicated record
-    Claim = 4,     // successor -> replica: majority takeover
-    Resync = 5,    // restarted node -> replica set: reconcile per-job state
-    FwdAck = 6,    // any node -> owner: forward a worker's completion
-    FwdStatus = 7, // any node -> owner: job status query
-    Apply = 8,     // owner -> replica: append one transition record (Lease/Done/Expire/...)
+    Ping = 1,         // liveness/testing echo
+    FwdSubmit = 2,    // gateway -> owner: submit on behalf of a client
+    Replicate = 3,    // owner -> replica: append a replicated record
+    Claim = 4,        // successor -> replica: majority takeover
+    Resync = 5,       // restarted node -> replica set: reconcile per-job state
+    FwdAck = 6,       // any node -> owner: forward a worker's completion
+    FwdStatus = 7,    // any node -> owner: job status query
+    Apply = 8,        // owner -> replica: append one transition record (Lease/Done/Expire/...)
+    DrainHandoff = 9, // draining owner -> successor: please claim this job from me
 };
 
 inline constexpr std::size_t kRpcHeader = 14; // kind + method + req_id + status

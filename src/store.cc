@@ -48,13 +48,7 @@ void JobStore::apply(const Record& r) {
     // owner already completed.
     if (const auto* rep = std::get_if<ReplicateRec>(&r)) {
         auto it = jobs_.find(rep->job.id);
-        const bool keep_local =
-            it != jobs_.end() &&
-            (rep->job.epoch < it->second.epoch ||
-             (rep->job.epoch == it->second.epoch &&
-              (it->second.state == JobState::Done ||
-               (it->second.state == JobState::DeadLetter && rep->job.state != JobState::Done))));
-        if (!keep_local) {
+        if (it == jobs_.end() || job_advances(it->second, rep->job)) {
             jobs_[rep->job.id] = rep->job;
         }
         by_idem_[rep->job.idem_key] = rep->job.id;

@@ -6,6 +6,41 @@ verified and how, slips stated plainly. Operating model unchanged from the taut 
 
 ---
 
+## M6 — failover: CLAIM/TAKEOVER, RESYNC, drain (2026-07-27)
+
+**Shipped:** the §3/§4 failover machinery, completing the protocol core.
+- **Takeover:** on a SWIM death verdict, the first alive member of each dead-owned job's
+  pinned replica order claims it: local `TAKEOVER{e+1}` fsync first, then CLAIM RPCs;
+  the job becomes leasable only at **majority of the pinned set counting self**. An
+  unconfirmed local takeover is provably harmless — every grant/completion is quorum-fenced.
+  Cascading deaths covered (each death event rescans all dead-owned jobs); claim retries
+  with idempotent re-claims; a peer missing the copy gets a full Replicate then a retry.
+- **Lease inheritance:** CLAIM grants return the replica's pre-claim `(state, lease_seq)`.
+  Because a claim majority intersects every lease majority, a committed lease ALWAYS
+  surfaces — the successor records it at its epoch, waits a full visibility window, and
+  accepts the original worker's old-epoch token (`current_lease` now keys on seq, which is
+  monotone per job across epochs).
+- **RESYNC:** triggered by any kStaleEpoch (fenced stale owner), by lost claims, and for
+  every owned active job at startup. Adopts a peer copy only when it strictly advances
+  (`job_advances`: epoch > , then Done > DeadLetter > higher seq > Leased>Ready) — a stale
+  view can never regress a committed lease. Demotion drops all lease bookkeeping.
+- **Drain:** stops grants, routes submits away, invites successors to claim via
+  DrainHandoff (the drainer itself grants the claim, so majority is immediate); done-cb
+  when no owned active jobs remain.
+- **Bug found by this module:** M4/M5 replica-slot iteration assumed self == slot 0, which
+  breaks the moment a takeover puts self elsewhere — generalized to peer-slot iteration
+  everywhere (quorum, repair, reachability).
+
+**Verified in Lima under ASan/UBSan: 44/44 ctest green** (6 new): owner death → claim
+majority → lease+complete under epoch 2; **inherited committed lease → no double grant +
+old-epoch token completes** (crown 1); **thawed stale owner fenced by kStaleEpoch
+everywhere, then self-demotes via resync** (crown 2); stale-log restart adopts Done and
+never re-executes; owner+replica dead → CP stall, recovers when one returns; drain hands
+off all jobs, fully operable at new owners. Two test-only races fixed (waits keyed on the
+local takeover instead of the claim majority). clang-format clean.
+
+---
+
 ## M5 — leases, completion, expiry, dead-letter (2026-07-27)
 
 **Shipped (queue_node + store guards + Method::Apply):**

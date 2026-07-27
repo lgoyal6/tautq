@@ -95,8 +95,19 @@ class QueueNode {
     // accepted (amnesty) — discarding finished work only forces a duplicate delivery.
     void ack(const JobId& id, std::uint32_t epoch, std::uint32_t lease_seq, bool success, AckCb cb);
 
-    // SWIM wiring (M6 expands this into takeover checks).
+    // SWIM wiring: tears down RPC state AND starts takeover claims for every non-terminal
+    // job the dead peer owned where this node is the deterministic successor (first alive
+    // member in the job's pinned replica-set order).
     void on_peer_dead(const taut::Endpoint& peer);
+
+    // Graceful shutdown (§3 drain): stop granting leases, route new submits away, and hand
+    // every owned non-terminal job to its successor via the ordinary claim path. `done`
+    // fires when no owned non-terminal jobs remain.
+    using DrainCb = std::function<void()>;
+    void drain(DrainCb done);
+    bool draining() const {
+        return draining_;
+    }
 
     // Introspection.
     JobStore& store() {
@@ -132,6 +143,24 @@ class QueueNode {
 
     void owner_ack(const JobId& id, std::uint32_t epoch, std::uint32_t lease_seq, bool success,
                    AckCb cb);
+
+    // Failover (M6, §3). Takeover commits TAKEOVER{e+1, self} locally FIRST, then collects
+    // CLAIM acks from the other replica-set members; the job only becomes actively owned
+    // (leasable) with a majority of the set (counting self). An unconfirmed local takeover
+    // is harmless: every grant/completion is quorum-fenced anyway.
+    void start_takeover(const JobId& id);
+    void finalize_takeover(const JobId& id);
+    void claim_send(const JobId& id, const taut::Endpoint& to);
+    void handle_claim(const RpcNode::ReqCtx& ctx, taut::ByteSpan body);
+    void handle_drain_handoff(const RpcNode::ReqCtx& ctx, taut::ByteSpan body);
+    void claim_tick(TimePoint now);
+    // Reconcile one job against its replica set (triggered by kStaleEpoch anywhere, by a
+    // lost claim, and for every owned job at startup). Adopts only copies that strictly
+    // advance (job_advances) — a stale view can never regress a committed lease.
+    void resync_job(const JobId& id);
+    void handle_resync(const RpcNode::ReqCtx& ctx, taut::ByteSpan body);
+    void after_ownership_change(const JobId& id); // drop lease bookkeeping if demoted
+    void drain_tick(TimePoint now);
     // Local fsync'd commit followed by Apply RPCs to both replicas; done(true) after one
     // replica ack (W=2 counting self). Also refreshes the repair mask pessimistically so
     // stragglers converge via the full-copy repair loop.
@@ -166,6 +195,25 @@ class QueueNode {
     std::deque<JobId> ready_;                                        // leasable, FIFO-ish
     std::unordered_map<JobId, TimePoint, JobIdHash> lease_deadline_; // visibility timers
     std::unordered_map<JobId, TimePoint, JobIdHash> not_before_;     // nack/quorum backoff
+
+    // Failover machinery:
+    struct ClaimState {
+        std::uint32_t proposed = 0;
+        int acks = 0;   // members (excluding self) that granted the claim
+        int needed = 1; // majority of the replica set, minus self
+        // Merged remote knowledge (the claim-quorum ∩ lease-quorum overlap guarantees any
+        // committed lease is visible in at least one grant response):
+        std::uint8_t best_state = 0;
+        std::uint32_t best_seq = 0;
+        std::uint64_t acked_mask = 0; // by replica slot
+        TimePoint next_retry{};
+    };
+    std::unordered_map<JobId, ClaimState, JobIdHash> claims_;
+    std::unordered_map<JobId, int, JobIdHash> resync_inflight_;
+    bool draining_ = false;
+    DrainCb drain_cb_;
+    TimePoint next_claim_tick_{};
+    TimePoint next_drain_tick_{};
 };
 
 } // namespace tautq

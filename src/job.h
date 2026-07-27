@@ -74,4 +74,10 @@ void put_job_id(std::vector<std::byte>& out, const JobId& id);
 JobId get_job_id(taut::ByteSpan in, std::size_t off);
 inline constexpr std::size_t kJobIdSize = 16;
 
+// The one ordering every full-copy merge path (Replicate, RESYNC, claim info) obeys: a
+// remote copy is adopted only if it STRICTLY advances the local one. Precedence: higher
+// epoch; then Done (absolute) > DeadLetter > higher lease_seq > Leased-over-Ready. Anything
+// else keeps local state — so a replica that never saw a committed lease can't erase it.
+bool job_advances(const Job& local, const Job& remote);
+
 } // namespace tautq

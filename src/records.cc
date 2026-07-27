@@ -37,6 +37,22 @@ bool from_hex(const std::string& s, JobId& id) {
     return true;
 }
 
+bool job_advances(const Job& local, const Job& remote) {
+    if (remote.epoch != local.epoch) {
+        return remote.epoch > local.epoch;
+    }
+    if ((remote.state == JobState::Done) != (local.state == JobState::Done)) {
+        return remote.state == JobState::Done;
+    }
+    if ((remote.state == JobState::DeadLetter) != (local.state == JobState::DeadLetter)) {
+        return remote.state == JobState::DeadLetter;
+    }
+    if (remote.lease_seq != local.lease_seq) {
+        return remote.lease_seq > local.lease_seq;
+    }
+    return remote.state == JobState::Leased && local.state == JobState::Ready;
+}
+
 void put_job_id(std::vector<std::byte>& out, const JobId& id) {
     put_u64(out, id.origin);
     put_u64(out, id.nonce);

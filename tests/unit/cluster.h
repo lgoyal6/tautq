@@ -129,6 +129,20 @@ struct Cluster {
             m->set(alive);
         }
     }
+    // One node's private view (asymmetric partitions: a frozen owner still sees everyone).
+    void set_node_membership(int node, std::initializer_list<int> alive_idx) {
+        std::vector<taut::Endpoint> alive;
+        for (int i : alive_idx) {
+            alive.push_back(eps[static_cast<std::size_t>(i)]);
+        }
+        mems[static_cast<std::size_t>(node)]->set(alive);
+    }
+    // Deliver a SWIM death verdict to specific survivors (view change + peer_dead).
+    void declare_dead_at(std::initializer_list<int> survivors, int dead) {
+        for (int s : survivors) {
+            nodes[static_cast<std::size_t>(s)]->on_peer_dead(eps[static_cast<std::size_t>(dead)]);
+        }
+    }
 
     // The node the ring says owns this key, given full membership.
     int ring_owner_index(const std::string& key) {
