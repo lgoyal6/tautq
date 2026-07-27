@@ -62,7 +62,8 @@ int main(int argc, char** argv) {
     }
 
     // ---- fold every node's WAL ---------------------------------------------------------
-    std::map<std::string, JobFacts> jobs; // by hex id
+    std::map<std::string, JobFacts> jobs;                 // by hex id
+    std::map<std::string, std::set<std::string>> key_ids; // idem key -> distinct job ids
     std::size_t log_dirs = 0;
     std::size_t pos = 0;
     while (pos < logs_csv.size()) {
@@ -90,6 +91,7 @@ int main(int argc, char** argv) {
                 f.have_copy = true;
                 f.max_lease_seq = std::max(f.max_lease_seq, j.lease_seq);
                 f.max_epoch = std::max(f.max_epoch, j.epoch);
+                key_ids[j.idem_key].insert(to_hex(j.id));
             };
             if (const auto* s = std::get_if<SubmitRec>(&*rec)) {
                 fold_job(s->job);
@@ -182,6 +184,7 @@ int main(int argc, char** argv) {
     std::size_t double_done = 0;
     std::size_t unexplained_dupes = 0;
     std::size_t dlq = 0;
+    std::size_t twins = 0;
 
     for (const auto& [key, acc] : accepted) {
         auto it = jobs.find(acc.id);
@@ -213,9 +216,18 @@ int main(int argc, char** argv) {
         const JobFacts* f = ait != accepted.end() && jobs.count(ait->second.id) != 0
                                 ? &jobs[ait->second.id]
                                 : nullptr;
-        // Attributable iff the logs show >1 grant (expiry/nack retry) or an epoch change
-        // (takeover re-run). Otherwise nothing in the protocol explains a second delivery.
-        const bool attributable = f != nullptr && (f->max_lease_seq > 1 || f->max_epoch > 1);
+        // Attributable iff the logs show >1 grant (expiry/nack retry), an epoch change
+        // (takeover re-run), or TWO DISTINCT jobs sharing the key — the documented dedup
+        // degradation when a gateway falls back to local ownership after a lost forward
+        // (§2; the receiver's idempotency key still dedups). Anything else is a protocol
+        // bug.
+        const auto kit = key_ids.find(key);
+        const bool fallback_twin = kit != key_ids.end() && kit->second.size() > 1;
+        const bool attributable =
+            fallback_twin || (f != nullptr && (f->max_lease_seq > 1 || f->max_epoch > 1));
+        if (fallback_twin) {
+            ++twins;
+        }
         if (!attributable) {
             ++unexplained_dupes;
             std::fprintf(stderr, "UNEXPLAINED-DUPE: key=%s deliveries=%d\n", key.c_str(), count);
@@ -241,8 +253,8 @@ int main(int argc, char** argv) {
         dup_total += static_cast<std::size_t>(c > 1 ? c - 1 : 0);
     }
     std::printf("verify: logs=%zu accepted=%zu delivered_keys=%zu duplicate_deliveries=%zu "
-                "(all attributable) dead_letter=%zu jobs_seen=%zu -> %s\n",
-                log_dirs, accepted.size(), deliveries.size(), dup_total, dlq, jobs.size(),
+                "(all attributable; fallback_twins=%zu) dead_letter=%zu jobs_seen=%zu -> %s\n",
+                log_dirs, accepted.size(), deliveries.size(), dup_total, twins, dlq, jobs.size(),
                 failures == 0 ? "PASS" : "FAIL");
     return failures == 0 ? 0 : 1;
 }

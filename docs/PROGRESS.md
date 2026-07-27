@@ -6,6 +6,30 @@ verified and how, slips stated plainly. Operating model unchanged from the taut 
 
 ---
 
+## M9 — CI: chaos on every PR (2026-07-27)
+
+**Shipped:** `.github/workflows/ci.yml` — build+ctest matrix {dev (ASan/UBSan), release},
+clang-format gate, and the **chaos job**: release build → loopback smoke → the full
+4-scenario chaos matrix in netns (iptables-only faults were chosen in M8 precisely so
+plain ubuntu runners need no netem/kernel modules). Failure uploads the kept evidence dirs
+as artifacts. taut is checked out as a sibling (public repo or `TAUT_READ_TOKEN` secret —
+the D8 open item; must be resolved at push time).
+
+**Second catch by the suite (release-mode run under 10% loss):** one "unexplained"
+duplicate delivery — diagnosed as the DOCUMENTED §2 fallback twin: a forwarded submit's
+response was lost, the gateway fell back to local ownership, two distinct jobs shared one
+idempotency key (`jobs_seen = accepted + 1` was the tell). The system behaved as designed
+and disclosed; the VERIFIER's attributability rule was too narrow — it now also attributes
+duplicates to multi-job keys and reports them as `fallback_twins`, keeping "zero
+unexplained duplicates" a real, tight assertion.
+
+**Verified locally (the CI jobs' exact commands):** dev ctest 48/48 + release ctest,
+release smoke PASS, release chaos matrix 4/4 PASS (clean re-run: 0 twins, 0 dupes).
+Honest caveat: the workflow itself runs first on the first GitHub push — runner-side
+behavior is validated only then.
+
+---
+
 ## M8 — 5-node netns cluster, chaos matrix, deploy artifacts (2026-07-27)
 
 **Shipped:**
