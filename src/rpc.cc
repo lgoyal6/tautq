@@ -189,18 +189,21 @@ void RpcNode::dispatch(const taut::Endpoint& from, taut::ByteSpan payload) {
         finish_call(msg->req_id, msg->status, msg->body);
         return;
     }
+    const ReqCtx ctx{from, msg->req_id, msg->method};
     auto hit = handlers_.find(static_cast<std::uint8_t>(msg->method));
-    Reply r;
     if (hit == handlers_.end()) {
-        r.status = 0xFFFFFFFF; // unknown method
-    } else {
-        r = hit->second(from, msg->body);
+        respond(ctx, 0xFFFFFFFF, {}); // unknown method
+        return;
     }
-    auto pit = peers_.find(ekey(from));
+    hit->second(ctx, msg->body);
+}
+
+void RpcNode::respond(const ReqCtx& ctx, std::uint32_t st, std::span<const std::byte> body) {
+    auto pit = peers_.find(ekey(ctx.from));
     if (pit == peers_.end() || !is_established(pit->second)) {
-        return; // peer vanished while the handler ran
+        return; // requester restarted or died since the request arrived
     }
-    const auto frame = encode_rpc(MsgKind::Response, msg->method, msg->req_id, r.status, r.body);
+    const auto frame = encode_rpc(MsgKind::Response, ctx.method, ctx.req_id, st, body);
     pit->second.session->send(taut::Class::ReliableUnordered, frame);
     // On send failure (full queue) the requester times out and retries — acceptable.
 }

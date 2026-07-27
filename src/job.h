@@ -54,9 +54,10 @@ struct Job {
     std::array<taut::Endpoint, 3> replicas{}; // [0] = owner at creation; successor order
 
     JobState state = JobState::Ready;
+    taut::Endpoint owner{};      // current owner (replicas[0] at birth; moves on Takeover)
     std::uint32_t epoch = 1;     // owner epoch e (fencing)
     std::uint32_t lease_seq = 0; // increments per grant; (epoch, lease_seq) = lease token
-    std::uint32_t attempts = 0;
+    std::uint32_t attempts = 0;  // == lease grants so far; DeadLetter at max_attempts
 };
 
 // Serialized-job budget: a full job description must fit one REPLICATE RPC (kMaxRpcBody)

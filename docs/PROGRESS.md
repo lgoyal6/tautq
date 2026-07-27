@@ -6,6 +6,32 @@ verified and how, slips stated plainly. Operating model unchanged from the taut 
 
 ---
 
+## M4 — submit + replication: ring routing, W=2 quorum, dedup, repair (2026-07-27)
+
+**Shipped:**
+- `ring.{h,cc}` — consistent-hash ring per D2 (splitmix64 node positions — raw ekeys would
+  cluster same-host nodes; FNV-1a key hash; successor walk). Consulted only at submit;
+  replica set pinned in the record forever. `Membership` interface + `StaticMembership`
+  (tests script liveness; M7 wraps taut::Swim).
+- `store.{h,cc}` — JobStore: replay and live commits fold through the SAME `apply()`
+  (restart view ≡ running view by construction). `commit()` = encode → WAL fsync → apply;
+  epoch-guarded merges everywhere (older-epoch Replicate/Done/etc. can't clobber newer state).
+- `queue_node.{h,cc}` — submit path per §§2-3: gateway ring-routes (FwdSubmit RPC), owner
+  dedups by idem key, fsyncs SubmitRec, replicates to both replicas, **acks the client on
+  W=2** (owner + 1); third copy async via the repair loop (pessimistic after restart —
+  re-replication is idempotent). Ring-owner-unreachable fallback: gateway owns locally,
+  documented dedup degradation. RPC handlers got deferred replies (`ReqCtx` + `respond()`)
+  because a forwarded submit can't answer until quorum.
+
+**Verified in Lima under ASan/UBSan: 31/31 ctest green** (6 new over a reusable SimNet
+Cluster harness with per-node tmp WALs, scripted membership, crash/restart): quorum ack +
+3/3 repair convergence + cross-gateway dedup; forward-to-owner under 2% loss; **kNoQuorum
+when both replicas down** (job kept locally, disclosed); repair after replica returns;
+restart rebuilds table + dedup index from log; fallback ownership when ring owner
+unreachable. clang-format clean.
+
+---
+
 ## M3 — job model, record serde, append-only WAL (2026-07-27)
 
 **Shipped:**

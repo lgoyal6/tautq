@@ -21,6 +21,7 @@ tautq::Job sample_job() {
     j.max_attempts = 3;
     j.replicas = {ep(9000), ep(9001), ep(9002)};
     j.state = tautq::JobState::Ready;
+    j.owner = ep(9000);
     j.epoch = 1;
     j.lease_seq = 0;
     j.attempts = 0;
@@ -36,6 +37,7 @@ void expect_job_eq(const tautq::Job& a, const tautq::Job& b) {
     EXPECT_EQ(a.max_attempts, b.max_attempts);
     EXPECT_EQ(a.replicas, b.replicas);
     EXPECT_EQ(a.state, b.state);
+    EXPECT_EQ(a.owner, b.owner);
     EXPECT_EQ(a.epoch, b.epoch);
     EXPECT_EQ(a.lease_seq, b.lease_seq);
     EXPECT_EQ(a.attempts, b.attempts);
@@ -75,10 +77,10 @@ TEST(Records, JobRejectsTruncation) {
 TEST(Records, AllRecordTypesRoundTrip) {
     const tautq::JobId id{1, 2};
     const std::vector<tautq::Record> records = {
-        tautq::SubmitRec{sample_job()},    tautq::ReplicateRec{sample_job()},
-        tautq::LeaseRec{id, 3, 4, 0xFEED}, tautq::DoneRec{id, 3, 4},
-        tautq::ExpireRec{id, 3, 4},        tautq::DeadLetterRec{id, 3},
-        tautq::TakeoverRec{id, 7},
+        tautq::SubmitRec{sample_job()},      tautq::ReplicateRec{sample_job()},
+        tautq::LeaseRec{id, 3, 4, 0xFEED},   tautq::DoneRec{id, 3, 4},
+        tautq::ExpireRec{id, 3, 4},          tautq::DeadLetterRec{id, 3},
+        tautq::TakeoverRec{id, 7, ep(9001)},
     };
     std::uint64_t lsn = 100;
     for (const auto& r : records) {

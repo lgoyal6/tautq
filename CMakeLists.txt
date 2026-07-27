@@ -29,6 +29,9 @@ add_library(tautq_core STATIC
     src/rpc.cc
     src/records.cc
     src/wal.cc
+    src/ring.cc
+    src/store.cc
+    src/queue_node.cc
 )
 target_include_directories(tautq_core PUBLIC src)
 target_compile_features(tautq_core PUBLIC cxx_std_20)

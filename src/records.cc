@@ -90,6 +90,7 @@ void put_job(std::vector<std::byte>& out, const Job& j) {
         put_endpoint(out, r);
     }
     put_u8(out, static_cast<std::uint8_t>(j.state));
+    put_endpoint(out, j.owner);
     put_u32(out, j.epoch);
     put_u32(out, j.lease_seq);
     put_u32(out, j.attempts);
@@ -116,7 +117,7 @@ std::size_t get_job(taut::ByteSpan in, std::size_t off, Job& j) {
     j.body.assign(in.begin() + static_cast<std::ptrdiff_t>(off),
                   in.begin() + static_cast<std::ptrdiff_t>(off + blen));
     off += blen;
-    if (off + 4 + 4 + 3 * kEndpointSize + 1 + 4 + 4 + 4 > in.size()) {
+    if (off + 4 + 4 + 4 * kEndpointSize + 1 + 4 + 4 + 4 > in.size()) {
         return 0;
     }
     j.visibility_ms = get_u32(in, off);
@@ -129,6 +130,8 @@ std::size_t get_job(taut::ByteSpan in, std::size_t off, Job& j) {
     }
     j.state = static_cast<JobState>(get_u8(in, off));
     off += 1;
+    j.owner = get_endpoint(in, off);
+    off += kEndpointSize;
     j.epoch = get_u32(in, off);
     off += 4;
     j.lease_seq = get_u32(in, off);
@@ -179,6 +182,7 @@ std::vector<std::byte> encode_record(const Record& r, std::uint64_t lsn) {
         tag(RecType::Takeover);
         put_job_id(out, t->id);
         put_u32(out, t->new_epoch);
+        put_endpoint(out, t->new_owner);
     }
     return out;
 }
@@ -236,10 +240,11 @@ std::optional<Record> decode_record(taut::ByteSpan body, std::uint64_t* lsn_out)
         return Record{DeadLetterRec{get_job_id(body, off), get_u32(body, off + kJobIdSize)}};
     }
     case RecType::Takeover: {
-        if (off + kJobIdSize + 4 > body.size()) {
+        if (off + kJobIdSize + 4 + kEndpointSize > body.size()) {
             return std::nullopt;
         }
-        return Record{TakeoverRec{get_job_id(body, off), get_u32(body, off + kJobIdSize)}};
+        return Record{TakeoverRec{get_job_id(body, off), get_u32(body, off + kJobIdSize),
+                                  get_endpoint(body, off + kJobIdSize + 4)}};
     }
     }
     return std::nullopt;

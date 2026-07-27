@@ -48,17 +48,23 @@ inline constexpr std::size_t kMaxRpcBody = 1120;
 // handshake retries, call timeouts, and session timers, using the transport's clock.
 class RpcNode {
   public:
-    struct Reply {
-        std::uint32_t status = 0;
-        std::vector<std::byte> body;
+    // Handed to request handlers; respond(ctx, ...) may be called immediately or later
+    // (e.g. after a quorum of further RPCs completes). If the requester restarted or died
+    // in the meantime, the response is silently dropped — its new incarnation would not
+    // recognize the req_id anyway.
+    struct ReqCtx {
+        taut::Endpoint from{};
+        std::uint64_t req_id = 0;
+        Method method = Method::Ping;
     };
-    using Handler = std::function<Reply(const taut::Endpoint& from, taut::ByteSpan body)>;
+    using Handler = std::function<void(const ReqCtx& ctx, taut::ByteSpan body)>;
     using ResponseCb = std::function<void(std::uint32_t status, taut::ByteSpan body)>;
 
     RpcNode(taut::UdpTransport& socket, taut::Endpoint self, taut::Config session_cfg,
             std::uint64_t boot_id);
 
     void on_request(Method m, Handler h);
+    void respond(const ReqCtx& ctx, std::uint32_t st, std::span<const std::byte> body);
 
     // Issue a request. `cb` fires exactly once: with the peer's response, or with a
     // synthesized kTimeout/kPeerDown/kTooLarge/kBusy. May fire synchronously on immediate
@@ -74,6 +80,10 @@ class RpcNode {
 
     std::uint64_t boot_id() const {
         return boot_;
+    }
+    // The transport's clock (virtual under SimNet) — the time source for everything above.
+    std::chrono::steady_clock::time_point now() const {
+        return demux_.inner().now();
     }
 
     // Introspection for tests.

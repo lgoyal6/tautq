@@ -75,6 +75,9 @@ class Demux {
     taut::UdpTransport& inner() {
         return inner_;
     }
+    const taut::UdpTransport& inner() const {
+        return inner_;
+    }
 
   private:
     friend class PeerView;

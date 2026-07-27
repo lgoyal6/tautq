@@ -58,6 +58,7 @@ struct DeadLetterRec {
 struct TakeoverRec {
     JobId id;
     std::uint32_t new_epoch = 0;
+    taut::Endpoint new_owner{}; // replicas replaying their log must know who owns now
 };
 
 using Record =

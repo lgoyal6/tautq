@@ -61,11 +61,8 @@ struct Pair {
 
 // Echo handler used as the standard test service.
 void serve_echo(tautq::RpcNode& n) {
-    n.on_request(tautq::Method::Ping, [](const taut::Endpoint&, taut::ByteSpan body) {
-        tautq::RpcNode::Reply r;
-        r.status = 0;
-        r.body.assign(body.begin(), body.end());
-        return r;
+    n.on_request(tautq::Method::Ping, [&n](const tautq::RpcNode::ReqCtx& ctx, taut::ByteSpan body) {
+        n.respond(ctx, 0, body);
     });
 }
 
