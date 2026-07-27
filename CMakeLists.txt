@@ -50,6 +50,12 @@ target_link_libraries(tautq-worker PRIVATE tautq_core tautq_warnings)
 add_executable(tautq-sink src/sink_main.cc)
 target_link_libraries(tautq-sink PRIVATE tautq_core tautq_warnings)
 
+add_executable(tautq-verify src/verify_main.cc)
+target_link_libraries(tautq-verify PRIVATE tautq_core tautq_warnings)
+
+add_executable(tautq-loadgen src/loadgen_main.cc)
+target_link_libraries(tautq-loadgen PRIVATE tautq_core tautq_warnings)
+
 if(TAUTQ_BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests)

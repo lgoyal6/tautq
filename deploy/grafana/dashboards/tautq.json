@@ -1,0 +1,65 @@
+{
+  "title": "tautq",
+  "uid": "tautq-main",
+  "schemaVersion": 39,
+  "refresh": "5s",
+  "time": { "from": "now-15m", "to": "now" },
+  "panels": [
+    {
+      "id": 1, "type": "timeseries", "title": "Queue depth (ready) by node",
+      "gridPos": { "x": 0, "y": 0, "w": 8, "h": 8 },
+      "targets": [{ "expr": "tautq_queue_depth{state=\"ready\"}", "legendFormat": "{{instance}}" }]
+    },
+    {
+      "id": 2, "type": "timeseries", "title": "In-flight leases",
+      "gridPos": { "x": 8, "y": 0, "w": 8, "h": 8 },
+      "targets": [{ "expr": "tautq_inflight_leases", "legendFormat": "{{instance}}" }]
+    },
+    {
+      "id": 3, "type": "timeseries", "title": "Replication backlog (jobs with unconfirmed copies)",
+      "gridPos": { "x": 16, "y": 0, "w": 8, "h": 8 },
+      "targets": [{ "expr": "tautq_replication_backlog", "legendFormat": "{{instance}}" }]
+    },
+    {
+      "id": 4, "type": "timeseries", "title": "End-to-end job latency (submit -> DONE)",
+      "gridPos": { "x": 0, "y": 8, "w": 12, "h": 8 },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "targets": [
+        { "expr": "histogram_quantile(0.50, sum by (le) (rate(tautq_job_latency_seconds_bucket[1m])))", "legendFormat": "p50" },
+        { "expr": "histogram_quantile(0.95, sum by (le) (rate(tautq_job_latency_seconds_bucket[1m])))", "legendFormat": "p95" },
+        { "expr": "histogram_quantile(0.99, sum by (le) (rate(tautq_job_latency_seconds_bucket[1m])))", "legendFormat": "p99" }
+      ]
+    },
+    {
+      "id": 5, "type": "timeseries", "title": "Throughput",
+      "gridPos": { "x": 12, "y": 8, "w": 12, "h": 8 },
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+      "targets": [
+        { "expr": "sum(rate(tautq_submits_total[1m]))", "legendFormat": "submits/s" },
+        { "expr": "sum(rate(tautq_completions_total{result=\"ok\"}[1m]))", "legendFormat": "completions/s" },
+        { "expr": "sum(rate(tautq_completions_total{result=\"fail\"}[1m]))", "legendFormat": "delivery failures/s" }
+      ]
+    },
+    {
+      "id": 6, "type": "timeseries", "title": "Membership churn",
+      "gridPos": { "x": 0, "y": 16, "w": 8, "h": 8 },
+      "targets": [{ "expr": "sum by (instance) (rate(tautq_membership_churn_total[5m]))", "legendFormat": "{{instance}}" }]
+    },
+    {
+      "id": 7, "type": "timeseries", "title": "Failover: takeovers and fenced stale owners",
+      "gridPos": { "x": 8, "y": 16, "w": 8, "h": 8 },
+      "targets": [
+        { "expr": "sum(increase(tautq_takeovers_total[5m]))", "legendFormat": "takeovers (5m)" },
+        { "expr": "sum(increase(tautq_fenced_stale_total[5m]))", "legendFormat": "fenced stale (5m)" }
+      ]
+    },
+    {
+      "id": 8, "type": "timeseries", "title": "Retries and dead letters",
+      "gridPos": { "x": 16, "y": 16, "w": 8, "h": 8 },
+      "targets": [
+        { "expr": "sum(increase(tautq_expirations_total[5m]))", "legendFormat": "lease expirations (5m)" },
+        { "expr": "sum(tautq_queue_depth{state=\"dead_letter\"})", "legendFormat": "dead-letter depth" }
+      ]
+    }
+  ]
+}

@@ -6,6 +6,50 @@ verified and how, slips stated plainly. Operating model unchanged from the taut 
 
 ---
 
+## M8 — 5-node netns cluster, chaos matrix, deploy artifacts (2026-07-27)
+
+**Shipped:**
+- `chaos/cluster.sh` — 5 network namespaces (tq0..tq4, 10.77.0.10+i) behind a bridge; sink
+  + chaos driver in the root ns. Faults are per-node iptables rules — partitions by source
+  drop, loss via `-m statistic` — deliberately NO netem/module dependency so plain CI
+  runners work. kill-node/start-node for crash-restart.
+- `chaos/chaos.sh` — the four-scenario matrix, each with submits streaming through
+  rotating gateways WHILE the fault is live: (a) SIGKILL a node mid-stream + restart;
+  (b) 2-node minority partition + heal; (c) 10% UDP loss everywhere; (d) stale-log restart
+  (WAL tail chopped by 400 bytes after SIGKILL).
+- `tautq-verify` — reads every node's WAL + the submitter's accept log + the sink receipts
+  and asserts §5: (1) every accepted job's merged cluster state is Done; (2) all DONE
+  records per job carry ONE lease_seq (exactly-once completion); (3) every duplicate sink
+  delivery is attributable (>1 grant or an epoch change in the logs) — zero unexplained.
+- `deploy/` — Dockerfile (multi-stage, sibling-checkout context), docker-compose (5 nodes
+  + 3 workers + sink + Prometheus + Grafana, NET_ADMIN for in-container chaos),
+  prometheus.yml, provisioned Grafana dashboard JSON (depth, leases, replication backlog,
+  p50/95/99 via histogram_quantile, throughput, churn, takeovers/fenced, DLQ).
+- `tautq-loadgen` + `bench/ramp.sh` + `bench/loss_matrix.sh` (M10 ammunition): open-loop
+  generator; latency quantiles derived from the CLUSTER's histogram deltas.
+
+**THE CATCH (the acceptance-criteria bug):** first full matrix run: kill/loss/stale PASS,
+**partition FAIL — 8 accepted jobs permanently stalled Ready** on minority node 4. Root
+cause traced to taut SWIM: a partition held past suspicion_timeout leaves both sides
+holding Dead verdicts; Dead members are never probed, so after heal no packet ever crosses
+the link again, and the accusations' gossip budgets were spent into the partition, so the
+accused never refutes. Permanent split; minority-owned jobs gated off quorum forever.
+**Fixed in taut v0.1.2** (dead-probing once per period carrying the target's own Dead
+rumor + Dead-rumor re-queue on contact; see taut D27). Partition scenario re-run: PASS
+(60/60). Full matrix re-run: see below.
+
+**Chaos matrix results (5-node netns cluster, streams live during faults) — 4/4 PASS:**
+- kill:      accepted=59 delivered=59 dup=0 dead_letter=0 → PASS
+- partition: accepted=60 delivered=60 dup=0 dead_letter=0 → PASS (after the v0.1.2 fix)
+- loss(10%): accepted=60 delivered=60 dup=0 dead_letter=0 → PASS
+- stale-log: accepted=59 delivered=59 dup=0 dead_letter=0 → PASS (tail chopped 400 B)
+
+**Harness bugs fixed along the way:** pkill patterns matching their own sudo wrapper
+(bracket trick); verifier needs sudo (root-owned WALs + tail truncation on replay);
+per-stream key ranges (batches were deduping into each other, shrinking coverage).
+
+---
+
 ## M7 — the running service: HTTP admin, metrics, node/worker/sink binaries (2026-07-27)
 
 **Shipped:**

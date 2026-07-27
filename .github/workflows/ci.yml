@@ -1,0 +1,77 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-test:
+    strategy:
+      matrix:
+        preset: [dev, release]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: tautq
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/taut
+          path: taut
+          # taut must be fetchable by CI: public repo, or a TAUT_READ_TOKEN secret (D8).
+          token: ${{ secrets.TAUT_READ_TOKEN || github.token }}
+      - name: deps
+        run: sudo apt-get update && sudo apt-get install -y clang cmake ninja-build
+      - name: configure
+        run: cmake --preset ${{ matrix.preset }}
+        working-directory: tautq
+      - name: build
+        run: cmake --build --preset ${{ matrix.preset }}
+        working-directory: tautq
+      - name: unit tests
+        run: ctest --preset ${{ matrix.preset }}
+        working-directory: tautq
+
+  format:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: clang-format
+        run: |
+          sudo apt-get update && sudo apt-get install -y clang-format
+          clang-format --dry-run -Werror src/*.h src/*.cc tests/unit/*.cc tests/unit/*.h
+
+  chaos:
+    # The whole point of this repo: every PR must survive the chaos matrix. netns + veth +
+    # iptables only (no netem/module dependencies), so plain ubuntu runners work.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: tautq
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/taut
+          path: taut
+          token: ${{ secrets.TAUT_READ_TOKEN || github.token }}
+      - name: deps
+        run: sudo apt-get update && sudo apt-get install -y clang cmake ninja-build iptables
+      - name: build (release — chaos timing should not run under sanitizers)
+        run: |
+          cmake --preset release -DTAUTQ_BUILD_TESTS=OFF
+          cmake --build --preset release
+        working-directory: tautq
+      - name: smoke (loopback, no sudo)
+        run: BIN=build/release ./scripts/smoke.sh
+        working-directory: tautq
+      - name: chaos matrix (kill / partition / loss / stale-log)
+        run: BIN=build/release JOBS=40 ./chaos/chaos.sh all
+        working-directory: tautq
+      - name: keep evidence on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: chaos-evidence
+          path: /tmp/tautq-chaos-*
+          if-no-files-found: ignore

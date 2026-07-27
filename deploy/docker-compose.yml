@@ -1,0 +1,105 @@
+# 5-node local cluster + workers + sink + Prometheus + Grafana.
+#
+#   cd tautq/deploy && docker compose up --build
+#
+# Requires the taut checkout as a SIBLING of tautq (build context is the parent dir).
+# Nodes get NET_ADMIN so the chaos suite can partition / drop packets inside containers.
+# Grafana: http://localhost:3000 (anonymous admin), Prometheus: http://localhost:9090.
+
+x-node: &node
+  build:
+    context: ../..
+    dockerfile: tautq/deploy/Dockerfile
+  cap_add: [NET_ADMIN]
+  networks:
+    tautq: {}
+
+services:
+  node0:
+    <<: *node
+    command: tautq-node --listen 172.28.0.10:9000 --http-port 8080 --data-dir /data
+      --peers 172.28.0.11:9000,172.28.0.12:9000,172.28.0.13:9000,172.28.0.14:9000
+    networks: { tautq: { ipv4_address: 172.28.0.10 } }
+    volumes: [node0-data:/data]
+    ports: ["8080:8080"]
+  node1:
+    <<: *node
+    command: tautq-node --listen 172.28.0.11:9000 --http-port 8080 --data-dir /data
+      --peers 172.28.0.10:9000,172.28.0.12:9000,172.28.0.13:9000,172.28.0.14:9000
+    networks: { tautq: { ipv4_address: 172.28.0.11 } }
+    volumes: [node1-data:/data]
+    ports: ["8081:8080"]
+  node2:
+    <<: *node
+    command: tautq-node --listen 172.28.0.12:9000 --http-port 8080 --data-dir /data
+      --peers 172.28.0.10:9000,172.28.0.11:9000,172.28.0.13:9000,172.28.0.14:9000
+    networks: { tautq: { ipv4_address: 172.28.0.12 } }
+    volumes: [node2-data:/data]
+    ports: ["8082:8080"]
+  node3:
+    <<: *node
+    command: tautq-node --listen 172.28.0.13:9000 --http-port 8080 --data-dir /data
+      --peers 172.28.0.10:9000,172.28.0.11:9000,172.28.0.12:9000,172.28.0.14:9000
+    networks: { tautq: { ipv4_address: 172.28.0.13 } }
+    volumes: [node3-data:/data]
+    ports: ["8083:8080"]
+  node4:
+    <<: *node
+    command: tautq-node --listen 172.28.0.14:9000 --http-port 8080 --data-dir /data
+      --peers 172.28.0.10:9000,172.28.0.11:9000,172.28.0.12:9000,172.28.0.13:9000
+    networks: { tautq: { ipv4_address: 172.28.0.14 } }
+    volumes: [node4-data:/data]
+    ports: ["8084:8080"]
+
+  worker0:
+    <<: *node
+    command: tautq-worker --node http://172.28.0.10:8080 --worker-id 100
+    depends_on: [node0]
+  worker1:
+    <<: *node
+    command: tautq-worker --node http://172.28.0.11:8080 --worker-id 101
+    depends_on: [node1]
+  worker2:
+    <<: *node
+    command: tautq-worker --node http://172.28.0.12:8080 --worker-id 102
+    depends_on: [node2]
+
+  sink:
+    <<: *node
+    command: tautq-sink --port 8090 --out /data/sink.log
+    networks: { tautq: { ipv4_address: 172.28.0.9 } }
+    volumes: [sink-data:/data]
+    ports: ["8090:8090"]
+
+  prometheus:
+    image: prom/prometheus:v2.53.0
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    networks: { tautq: {} }
+    ports: ["9090:9090"]
+
+  grafana:
+    image: grafana/grafana:11.1.0
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: "Admin"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    networks: { tautq: {} }
+    ports: ["3000:3000"]
+
+networks:
+  tautq:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/24
+
+volumes:
+  node0-data: {}
+  node1-data: {}
+  node2-data: {}
+  node3-data: {}
+  node4-data: {}
+  sink-data: {}
