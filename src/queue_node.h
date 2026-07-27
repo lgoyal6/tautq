@@ -109,6 +109,28 @@ class QueueNode {
         return draining_;
     }
 
+    // Observability (scraped by the /metrics endpoint; gauges come from store scans).
+    struct Counters {
+        std::uint64_t submits = 0;
+        std::uint64_t duplicates = 0;
+        std::uint64_t leases_granted = 0;
+        std::uint64_t completions_ok = 0;
+        std::uint64_t completions_failed = 0; // worker-reported delivery failures
+        std::uint64_t expirations = 0;
+        std::uint64_t deadletters = 0;
+        std::uint64_t takeovers = 0;
+        std::uint64_t fenced_stale = 0; // Apply records we rejected with kStaleEpoch
+    };
+    const Counters& counters() const {
+        return counters_;
+    }
+    // Fired with submit->DONE seconds for jobs completed while this node owned them (and
+    // whose submit this process saw — the map is in-memory; restarts lose samples, which
+    // biases nothing that matters for a latency histogram).
+    void on_done_latency(std::function<void(double)> f) {
+        on_latency_ = std::move(f);
+    }
+
     // Introspection.
     JobStore& store() {
         return store_;
@@ -195,6 +217,10 @@ class QueueNode {
     std::deque<JobId> ready_;                                        // leasable, FIFO-ish
     std::unordered_map<JobId, TimePoint, JobIdHash> lease_deadline_; // visibility timers
     std::unordered_map<JobId, TimePoint, JobIdHash> not_before_;     // nack/quorum backoff
+
+    Counters counters_;
+    std::function<void(double)> on_latency_;
+    std::unordered_map<JobId, TimePoint, JobIdHash> submit_time_;
 
     // Failover machinery:
     struct ClaimState {

@@ -6,6 +6,41 @@ verified and how, slips stated plainly. Operating model unchanged from the taut 
 
 ---
 
+## M7 — the running service: HTTP admin, metrics, node/worker/sink binaries (2026-07-27)
+
+**Shipped:**
+- `loop.{h,cc}` — tautq's own level-triggered epoll wrapper (the node multiplexes two UDP
+  sockets + a TCP listener + connections; taut's loop is UDP-only).
+- `http.{h,cc}` — hand-rolled HTTP/1.1 server (D8, no framework): Content-Length bodies,
+  keep-alive, **async responses** (a handler parks its Respond until a quorum completes;
+  responding to a gone client is a safe no-op). Lease grants ride in `X-Tautq-*` response
+  headers so the worker needs no JSON parser anywhere.
+- `http_client.{h,cc}` — tiny blocking client for worker/loadgen processes.
+- `metrics.{h,cc}` — hand-rolled Prometheus text: counters, gauges, log-scale histogram
+  (Grafana computes p50/95/99 via histogram_quantile). QueueNode instrumented: submits,
+  duplicates, leases, completions ok/fail, expirations, deadletters, takeovers,
+  fenced_stale, replication backlog, queue-depth gauges, submit→DONE latency histogram.
+- `tautq-node` — binary wiring RealUdpTransport×2 + Swim (SWIM port = data+1; JOIN on boot
+  for the v0.1.1 rejoin path) + SwimMembership + QueueNode + admin API:
+  POST /v1/jobs|lease|ack|drain, GET /v1/jobs/{id}|/v1/nodes|/metrics|/healthz.
+- `tautq-worker` — separate process (chaos can SIGKILL it independently): long-polls
+  lease, POSTs body to the job URL with `Idempotency-Key`, acks ok/fail; retries acks
+  through 503 (completion quorum forming).
+- `tautq-sink` — the chaos oracle: logs `mono_ms key attempt path bytes` per accepted
+  delivery; seeded `--fail-rate` for injected 500s.
+
+**Bug ASan caught before any human could:** HttpServer::Respond passed the connection
+map's own shared_ptr slot BY REFERENCE into send_response; a close inside the response
+path erased that slot mid-use (heap-use-after-free). All conn-mutating paths now take the
+shared_ptr by value.
+
+**Verified:** 48/48 ctest green in Lima (4 new: routing/query/header/body round-trip,
+deferred-response pattern, histogram render). **First real end-to-end run PASSED**
+(`scripts/smoke.sh`): 3 nodes + sink + 2 workers on loopback, 10 jobs via 3 different
+gateways → 10/10 Done, sink logged exactly 10 unique idempotency keys. clang-format clean.
+
+---
+
 ## M6 — failover: CLAIM/TAKEOVER, RESYNC, drain (2026-07-27)
 
 **Shipped:** the §3/§4 failover machinery, completing the protocol core.

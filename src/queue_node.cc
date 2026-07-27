@@ -216,9 +216,11 @@ void QueueNode::submit(SubmitParams p, SubmitCb cb) {
 
 void QueueNode::owner_submit(SubmitParams p, SubmitCb cb) {
     if (Job* existing = store_.find_by_idem(p.idem_key)) {
+        counters_.duplicates++;
         cb(qstatus::kDuplicate, existing->id);
         return;
     }
+    counters_.submits++;
     Job j;
     j.id.origin = ekey(cfg_.self);
     j.id.nonce = ((boot_ & 0xFFFFFFFFull) << 32) | next_job_seq_++;
@@ -253,6 +255,7 @@ void QueueNode::owner_submit(SubmitParams p, SubmitCb cb) {
         return;
     }
     ready_.push_back(j.id); // leasable immediately; workers see it before repair finishes
+    submit_time_[j.id] = rpc_.now();
     start_replication(j.id, /*track_quorum=*/true, std::move(cb));
 }
 
@@ -485,6 +488,7 @@ void QueueNode::handle_apply(const RpcNode::ReqCtx& ctx, taut::ByteSpan body) {
     // Epoch fencing — THE line that stops a partitioned stale owner: its records carry an
     // epoch below what a majority already adopted, so it cannot commit a lease anywhere.
     if (m.epoch < j->epoch) {
+        counters_.fenced_stale++;
         rpc_.respond(ctx, qstatus::kStaleEpoch, {});
         return;
     }
@@ -536,6 +540,7 @@ void QueueNode::lease(std::uint64_t worker_id, LeaseCb cb) {
     const std::uint32_t new_seq = pick->lease_seq + 1;
     if (new_seq > pick->max_attempts) {
         const JobId dead = pick->id;
+        counters_.deadletters++;
         quorum_commit(dead, Record{DeadLetterRec{dead, pick->epoch}}, [](bool) {});
         cb(qstatus::kNoJob, {}); // parked; the worker just polls again
         return;
@@ -558,6 +563,7 @@ void QueueNode::lease(std::uint64_t worker_id, LeaseCb cb) {
             cb(qstatus::kNoQuorum, {});
             return;
         }
+        counters_.leases_granted++;
         lease_deadline_[id] = rpc_.now() + std::chrono::milliseconds(j->visibility_ms);
         LeaseGrant g;
         g.id = id;
@@ -586,8 +592,10 @@ void QueueNode::expiry_tick(TimePoint now) {
             continue;
         }
         if (j->lease_seq >= j->max_attempts) {
+            counters_.deadletters++;
             quorum_commit(id, Record{DeadLetterRec{id, j->epoch}}, [](bool) {});
         } else {
+            counters_.expirations++;
             quorum_commit(id, Record{ExpireRec{id, j->epoch, j->lease_seq}}, [](bool) {});
             requeue_ready(id, now); // expired worker is gone; no backoff for the next one
         }
@@ -660,6 +668,7 @@ void QueueNode::owner_ack(const JobId& id, std::uint32_t epoch, std::uint32_t le
             return;
         }
         // Delivery failed (e.g. destination 5xx): back to Ready with exponential backoff.
+        counters_.completions_failed++;
         lease_deadline_.erase(id);
         quorum_commit(id, Record{ExpireRec{id, j->epoch, j->lease_seq}}, [](bool) {});
         requeue_ready(id, rpc_.now() + nack_backoff(j->attempts));
@@ -677,8 +686,18 @@ void QueueNode::owner_ack(const JobId& id, std::uint32_t epoch, std::uint32_t le
     }
     lease_deadline_.erase(id);
     not_before_.erase(id);
-    quorum_commit(id, Record{DoneRec{id, j->epoch, j->lease_seq}},
-                  [cb](bool ok) { cb(ok ? qstatus::kCreated : qstatus::kNoQuorum); });
+    quorum_commit(id, Record{DoneRec{id, j->epoch, j->lease_seq}}, [this, id, cb](bool ok) {
+        if (auto ts = submit_time_.find(id); ts != submit_time_.end()) {
+            if (on_latency_) {
+                on_latency_(std::chrono::duration<double>(rpc_.now() - ts->second).count());
+            }
+            submit_time_.erase(ts);
+        }
+        if (ok) {
+            counters_.completions_ok++;
+        }
+        cb(ok ? qstatus::kCreated : qstatus::kNoQuorum);
+    });
 }
 
 void QueueNode::repair_tick(TimePoint now) {
@@ -884,6 +903,7 @@ void QueueNode::finalize_takeover(const JobId& id) {
     if (j == nullptr || !owned_by_me(*j)) {
         return;
     }
+    counters_.takeovers++;
     const auto now = rpc_.now();
     const auto merged = static_cast<JobState>(st.best_state);
     if (merged == JobState::Done && j->state != JobState::Done) {

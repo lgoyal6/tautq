@@ -32,10 +32,23 @@ add_library(tautq_core STATIC
     src/ring.cc
     src/store.cc
     src/queue_node.cc
+    src/metrics.cc
+    src/loop.cc
+    src/http.cc
+    src/http_client.cc
 )
 target_include_directories(tautq_core PUBLIC src)
 target_compile_features(tautq_core PUBLIC cxx_std_20)
 target_link_libraries(tautq_core PUBLIC taut PRIVATE tautq_warnings)
+
+add_executable(tautq-node src/node_main.cc)
+target_link_libraries(tautq-node PRIVATE tautq_core tautq_warnings)
+
+add_executable(tautq-worker src/worker_main.cc)
+target_link_libraries(tautq-worker PRIVATE tautq_core tautq_warnings)
+
+add_executable(tautq-sink src/sink_main.cc)
+target_link_libraries(tautq-sink PRIVATE tautq_core tautq_warnings)
 
 if(TAUTQ_BUILD_TESTS)
     enable_testing()
