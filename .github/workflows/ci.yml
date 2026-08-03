@@ -70,7 +70,7 @@ jobs:
         working-directory: tautq
       - name: keep evidence on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: chaos-evidence
           path: /tmp/tautq-chaos-*
