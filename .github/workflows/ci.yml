@@ -12,10 +12,10 @@ jobs:
         preset: [dev, release]
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           path: tautq
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           repository: ${{ github.repository_owner }}/taut
           path: taut
@@ -36,7 +36,7 @@ jobs:
   format:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: clang-format
         run: |
           sudo apt-get update && sudo apt-get install -y clang-format
@@ -47,10 +47,10 @@ jobs:
     # iptables only (no netem/module dependencies), so plain ubuntu runners work.
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           path: tautq
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           repository: ${{ github.repository_owner }}/taut
           path: taut
