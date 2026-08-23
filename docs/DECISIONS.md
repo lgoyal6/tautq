@@ -1,4 +1,4 @@
-# tautq — decision record
+# tautq - decision record
 
 Format mirrors taut/docs/DECISIONS.md. All of D1–D8 were proposed in the protocol brief and
 approved by Laksh on 2026-07-27 ("Approve as proposed"). Details: docs/DESIGN-protocol.md.
@@ -8,7 +8,7 @@ approved by Laksh on 2026-07-27 ("Approve as proposed"). Details: docs/DESIGN-pr
   keys + visibility timeouts is literally the industry contract (Stripe/GitHub webhooks), so
   the demo service and the protocol are the same thing, not an approximation.
 - Rationale (Laksh): wanted the job tuned to a real-life instance; watcher-style personal
-  workloads rejected as not needing tautq — only workloads where the guarantees are
+  workloads rejected as not needing tautq - only workloads where the guarantees are
   load-bearing (fan-out delivery, long downloads) are claimed.
 
 ### D2. Placement: **ring-routed ownership, replica set of 3 pinned at submit**
@@ -24,7 +24,7 @@ approved by Laksh on 2026-07-27 ("Approve as proposed"). Details: docs/DESIGN-pr
 - Rationale (Laksh): approved per brief §3.
 
 ### D4. Lease authority: **owner-only, token = (owner_epoch, lease_seq), lease committed W=2 before grant**
-- The pre-grant majority commit — not a timeout — is what prevents a partitioned stale owner
+- The pre-grant majority commit - not a timeout - is what prevents a partitioned stale owner
   from granting; visibility timeout 30 s default, per-job override; successor amnesty-accepts
   older-epoch acks for jobs neither DONE nor re-leased.
 - Rationale (Laksh): approved per brief §3.
@@ -42,13 +42,13 @@ approved by Laksh on 2026-07-27 ("Approve as proposed"). Details: docs/DESIGN-pr
 
 ### D7. Semantics: **at-least-once execution, exactly-once completion**
 - Chaos suite asserts: no loss, single committed DONE, every duplicate attempt attributable to
-  an expired/orphaned lease. Literal "never runs twice" disclaimed as unachievable — duplicate
+  an expired/orphaned lease. Literal "never runs twice" disclaimed as unachievable - duplicate
   deliveries carry the same Idempotency-Key.
 - Rationale (Laksh): approved per brief §5 (honesty correction accepted).
 
 ### D8. Infra defaults (brief §6, accepted by silence)
 - Sibling repo vendoring taut (FetchContent, tag ≥ v0.1.1; taut must become public or CI needs
-  a PAT — OPEN, decide before CI lands). Hand-rolled HTTP/1.1 + Prometheus text exposition.
+  a PAT - OPEN, decide before CI lands). Hand-rolled HTTP/1.1 + Prometheus text exposition.
   Ports 9000/9001/8080. Chaos via netem/iptables in NET_ADMIN containers, userspace UDP-proxy
   fallback for CI determinism. In-process worker pools behind the same HTTP lease/ack API.
   DEAD_LETTER after max_attempts. Metrics: depth, in-flight leases, replication lag, churn,

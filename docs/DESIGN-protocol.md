@@ -1,4 +1,4 @@
-# tautq — lease & replication protocol (approved 2026-07-27)
+# tautq - lease & replication protocol (approved 2026-07-27)
 
 tautq is a distributed webhook-delivery service (a work queue whose jobs are "POST this body
 to this URL until a 2xx comes back") built on the taut transport + SWIM membership library.
@@ -12,12 +12,12 @@ to this URL until a 2xx comes back") built on the taut transport + SWIM membersh
 - States: `READY → LEASED → DONE`, lease expiry returns `LEASED → READY`, and
   `attempts == max_attempts` moves a job to `DEAD_LETTER` (terminal, queryable, re-drivable
   by admin).
-- `job_id = (owner_node_id, local_seq, random16)` — unique without coordination; status
+- `job_id = (owner_node_id, local_seq, random16)` - unique without coordination; status
   queries route to the embedded owner first, then fall back to broadcast (N is small).
 - Payloads above one taut datagram (~1.1 KiB) are out of scope for v1 (v1.1: chunked over
   class 2).
 
-## 2. Placement & replication — ring-routed ownership, pinned at birth
+## 2. Placement & replication - ring-routed ownership, pinned at birth
 
 - Any node accepts a submit. It forwards to `owner = ring_successor(hash(idempotency_key))`
   over the currently-alive membership (sorted node ids; SWIM supplies liveness).
@@ -25,12 +25,12 @@ to this URL until a 2xx comes back") built on the taut transport + SWIM membersh
   record and never rebalanced**. The ring is consulted only at submit time.
 - Cross-node idempotency dedup therefore holds under stable membership and degrades to
   best-effort under churn or when the ring owner is unreachable (gateway falls back to any
-  alive node that can reach 2 peers) — documented, not hidden.
+  alive node that can reach 2 peers) - documented, not hidden.
 - Rejected alternatives: submitter-is-owner (no cross-node dedup), full Dynamo-style ring with
   range handoff (rebalancing machinery unneeded at this scale), single Raft group (a central
   coordinator in disguise).
 
-## 3. Commit rule — majority commit with owner-epoch fencing
+## 3. Commit rule - majority commit with owner-epoch fencing
 
 Every state transition (`SUBMIT`, `LEASE`, `DONE`, `TAKEOVER`) is a log record, acknowledged
 only after it is fsync-durable on a **majority of the replica set (W = 2 of 3, counting the
@@ -44,7 +44,7 @@ epoch. Consequences:
   lose an unrepaired job (stated in README).
 - **Lease:** `LEASE{job, worker, token=(e, lease_seq), deadline}` must be acked by one replica
   **before** the job is handed to a worker. A partitioned stale owner (epoch e, cluster at
-  e+1) cannot get any lease acked, so it cannot grant — this is what makes "two workers never
+  e+1) cannot get any lease acked, so it cannot grant - this is what makes "two workers never
   validly hold the same job" true, not a timeout heuristic.
 - **Complete:** worker acks with its token; owner validates token == current lease, then
   majority-commits `DONE`. Stale tokens → 409. A successor also accepts an older-epoch ack iff
@@ -72,7 +72,7 @@ epoch. Consequences:
 ## 5. Delivery semantics (the honest contract)
 
 **At-least-once execution, exactly-once completion.** Literal "no job ever runs twice" is
-unachievable in any visibility-timeout system — a worker SIGKILLed mid-delivery *must* cause a
+unachievable in any visibility-timeout system - a worker SIGKILLed mid-delivery *must* cause a
 re-run. What the chaos suite asserts instead:
 
 1. **No loss:** every job acked at submit is eventually DONE (or DEAD_LETTER) exactly once,
@@ -80,10 +80,10 @@ re-run. What the chaos suite asserts instead:
 2. **Exactly-once completion:** at most one DONE ever commits per job; no two valid leases
    overlap (epoch fencing).
 3. **Attributable re-execution:** every duplicate delivery attempt maps to a provably expired
-   or orphaned lease — zero unexplained duplicates. In chaos scenarios where no leaseholder
+   or orphaned lease - zero unexplained duplicates. In chaos scenarios where no leaseholder
    dies mid-delivery, attempts == 1.
 
-Duplicate deliveries carry the same `Idempotency-Key` header, so the receiver can dedup —
+Duplicate deliveries carry the same `Idempotency-Key` header, so the receiver can dedup  - 
 which is exactly the contract real webhook providers (Stripe/GitHub) publish.
 
 ## 6. Transport mapping (taut integration)
@@ -102,14 +102,14 @@ which is exactly the contract real webhook providers (Stripe/GitHub) publish.
 - **(M5, 2026-07-27) Quorum-failed lease attempts consume `lease_seq`.** A lease is
   committed locally before its replica quorum; on quorum failure it is self-expired with
   the fence values intact. Conservative in the safe direction (can never double-grant),
-  but repeated quorum failures could burn a job's attempts — mitigated by the membership
+  but repeated quorum failures could burn a job's attempts - mitigated by the membership
   gate (an owner that can see no replica alive refuses to try) plus per-job backoff.
 - **(M5) EXPIRE and DEAD_LETTER replicate asynchronously** (not W=2-blocking like
   SUBMIT/LEASE/DONE): ack fencing is by exact `(epoch, lease_seq)` match, so a replica
   with stale lease knowledge cannot cause an incorrect acceptance, and takeover re-arms
   deadlines conservatively. The full-copy repair loop converges stragglers.
 - **(M6) Takeover commits locally BEFORE collecting claim acks.** An unconfirmed local
-  takeover is provably harmless — acting on ownership means committing leases/completions,
+  takeover is provably harmless - acting on ownership means committing leases/completions,
   and those are quorum-fenced. This avoids a claim-retry livelock without adding an epoch
   reservation protocol.
 - **(M6) `current_lease` keys on `lease_seq`, with `token.epoch <= job.epoch`:** the seq is
