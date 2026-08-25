@@ -3,7 +3,7 @@
 [![ci](https://github.com/lgoyal6/tautq/actions/workflows/ci.yml/badge.svg)](https://github.com/lgoyal6/tautq/actions/workflows/ci.yml)
 
 A distributed webhook-delivery service - five nodes, **no coordinator** - built on
-[taut](../taut), a reliable-UDP transport + SWIM membership library written from scratch.
+[taut](https://github.com/lgoyal6/taut), a reliable-UDP transport + SWIM membership library written from scratch.
 
 A job is *"POST this body to this URL with this idempotency key, and retry until a 2xx
 comes back."* Submit to any node; the job is fsync-durable on a majority of its 3-node
