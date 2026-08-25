@@ -1,4 +1,4 @@
-# Same warning contract as taut (CLAUDE.md): -Wall -Wextra -Werror + strict extras for
+# Same warning contract as taut: -Wall -Wextra -Werror + strict extras for
 # library code; relaxed set for test targets (framework headers trip the strict set).
 add_library(tautq_warnings INTERFACE)
 target_compile_options(tautq_warnings INTERFACE
