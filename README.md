@@ -182,5 +182,5 @@ tests/      48 unit/protocol tests over taut's deterministic SimNet (ASan/UBSan)
 chaos/      netns cluster harness + the 4-scenario matrix
 bench/      load ramp + loss matrix scripts and their CSVs
 deploy/     Dockerfile, docker-compose, Prometheus config, Grafana dashboard
-docs/       DESIGN-protocol.md (the approved protocol), DECISIONS.md, PROGRESS.md
+docs/       DESIGN-protocol.md (the approved protocol), DECISIONS.md
 ```
