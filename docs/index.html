@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>tautq - where the knee is, and what is past it</title>
+<meta name="description" content="A five-node webhook queue with no coordinator. Flat 63ms p99 to 600 jobs a second, 107ms at 800, and past 1000 it stops degrading gracefully. Those rows are in the CSV and deliberately unpublished.">
+<meta property="og:title" content="tautq">
+<meta property="og:description" content="Drag the offered rate and watch p99 leave its flat band. The rows past the knee are shown as what they are: suspect, and not a measurement.">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="gut">
+  <div>
+    <div class="eyebrow">lgoyal6 / tautq</div>
+    <h1>tautq<span class="dot">.</span></h1>
+    <p class="thesis">
+      A distributed webhook-delivery service across five nodes with no coordinator, built
+      on a reliable-UDP transport and SWIM membership written from scratch. A job is
+      durable on a majority before the submit is acknowledged.
+    </p>
+    <p class="thesis">
+      <strong>The knee is at about 800 jobs a second, and past 1000 it does not degrade
+      gracefully.</strong> Those rows are in the CSV. They are shown here as what they are
+      rather than left out or drawn as a curve.
+    </p>
+  </div>
+  <dl class="facts">
+    <div class="fact"><dt>flat p99 band</dt><dd>63 ms <small>up to 600 jobs a second</small></dd></div>
+    <div class="fact"><dt>at the knee</dt><dd>107 ms <small>p99, at 800/s</small></dd></div>
+    <div class="fact"><dt>past it</dt><dd>0 <small>completed at 1000/s</small></dd></div>
+    <div class="fact"><dt>the cause</dt><dd>~9 <small>fsyncs per job, cluster-wide</small></dd></div>
+  </dl>
+</header>
+
+<section class="gut">
+  <div class="eyebrow">Figure 1</div>
+  <h2>The ramp, and where it stops holding</h2>
+  <p class="lead">
+    Twenty seconds at each offered rate. Up to 600 a second the tail sits in a flat band:
+    the worker poll interval plus delivery plus two majority commits. The band is what a
+    healthy system looks like, and leaving it is the signal.
+  </p>
+
+  <div class="figure">
+    <div class="figcap">
+      <span id="cap-what">Loading</span>
+      <span id="cap-setup"></span>
+    </div>
+    <div class="toolbar">
+      <span class="picklabel">Offered rate</span>
+      <div class="pick" id="rates" role="group" aria-label="Offered rate"></div>
+    </div>
+    <canvas class="plot" id="plot-ramp" width="1200" height="340"></canvas>
+    <dl class="readout">
+      <div><dt>offered</dt><dd id="r-off">-</dd></div>
+      <div><dt>accepted</dt><dd id="r-acc">-</dd></div>
+      <div><dt>completed</dt><dd id="r-done">-</dd></div>
+      <div><dt>p50</dt><dd id="r-p50">-</dd></div>
+      <div><dt>p99</dt><dd id="r-p99">-</dd></div>
+    </dl>
+    <div class="banner" id="ramp-banner">Loading.</div>
+  </div>
+
+  <div class="split">
+    <div>
+      <h3>Why it saturates where it does</h3>
+      <p>
+        Every job costs roughly <strong>nine fsyncs cluster-wide</strong>: submit, lease and
+        done on the owner, plus the replica appends behind each. At 800 a second that is
+        about <strong>1,400 fsyncs per second per node</strong>, and the design commits one
+        at a time. The transport is not the limit; the disk barrier is.
+      </p>
+      <p>
+        Group commit already exists in the write-ahead log as an unbatched call and a
+        separate sync. Turning it on is the known next step, and it is not implemented, so
+        the number on this page is the number without it.
+      </p>
+    </div>
+    <dl class="takeaway">
+      <dt>flat band</dt>
+      <dd>63 ms p99, to 600 a second.<small>Poll interval plus two majority commits.</small></dd>
+      <dt>the knee</dt>
+      <dd>800 a second.<small>p99 leaves the band and reaches 107 ms.</small></dd>
+      <dt>the fix, not yet done</dt>
+      <dd>Group commit.<small>The arithmetic says fsync, not transport.</small></dd>
+    </dl>
+  </div>
+</section>
+
+<section class="gut">
+  <div class="eyebrow">Figure 2</div>
+  <h2>What packet loss costs</h2>
+  <p class="lead">
+    Held at 200 jobs a second, well under the knee, so loss is the only thing changing.
+    Loss is injected on every node's UDP ingress, which means a dropped packet can be a
+    submit, a replica append, or a membership probe.
+  </p>
+  <div class="figure">
+    <div class="figcap">
+      <span id="cap-loss">Loading</span>
+      <span>200 jobs a second at every point</span>
+    </div>
+    <div class="toolbar">
+      <span class="picklabel">UDP loss</span>
+      <div class="pick" id="losses" role="group" aria-label="Loss rate"></div>
+    </div>
+    <canvas class="plot" id="plot-loss" width="1200" height="320"></canvas>
+    <dl class="readout">
+      <div><dt>loss</dt><dd id="l-loss">-</dd></div>
+      <div><dt>completed</dt><dd id="l-done">-</dd></div>
+      <div><dt>p50</dt><dd id="l-p50">-</dd></div>
+      <div><dt>p95</dt><dd id="l-p95">-</dd></div>
+      <div><dt>p99</dt><dd id="l-p99">-</dd></div>
+    </dl>
+    <div class="banner" id="loss-banner">Loading.</div>
+  </div>
+
+  <div class="split">
+    <div>
+      <p>
+        <strong>Nothing is lost up to 20% packet loss.</strong> Every job that was accepted
+        still completed at every point on this chart, which is what the retransmit and the
+        majority commit are for. What changes is the tail.
+      </p>
+      <p>
+        At 10% loss the p99 is 127 ms, roughly double the clean figure. At 20% it is
+        <strong>1,019 ms</strong>, sixteen times. A retry costs a round trip and the
+        round trips compound, so the tail moves long before the throughput does.
+      </p>
+    </div>
+    <dl class="takeaway">
+      <dt>correctness</dt>
+      <dd>Unchanged to 20% loss.<small>Everything accepted still completed.</small></dd>
+      <dt>the tail</dt>
+      <dd>63 ms to 1,019 ms.<small>Sixteen times, at 20% loss.</small></dd>
+      <dt>where it turns</dt>
+      <dd>Between 10% and 20%.<small>p95 goes 79 ms to 633 ms.</small></dd>
+    </dl>
+  </div>
+</section>
+
+<section class="gut">
+  <div class="eyebrow">Figure 3</div>
+  <h2>The rows that are not published</h2>
+  <p class="lead">
+    Two steps past the knee are in the CSV and are not in the results table. Here they are,
+    and here is why they are not a measurement of anything.
+  </p>
+  <div class="figure">
+    <div class="grid-wrap"><table class="data" id="suspect"></table></div>
+    <div class="banner alarm" id="suspect-banner"></div>
+  </div>
+  <div class="suspect-box">
+    <div class="tag">why they are excluded</div>
+    <p>
+      Past about 1000 a second the cluster does not degrade gracefully: nodes become
+      intermittently unresponsive, submits and scrapes time out, and the step stops
+      offering the load it was told to. At 1000 the harness offered 2,960 of the 20,000 it
+      was asked for and nothing completed inside the window, so the percentile columns are
+      a sentinel rather than a latency. At 1200 the completions are backlog from earlier
+      steps draining, which is why that row reports more completed than it offered.
+    </p>
+  </div>
+</section>
+
+<section class="gut">
+  <div class="eyebrow">Figure 4</div>
+  <h2>Where it loses</h2>
+  <ul class="map">
+    <li>
+      <b>Five nodes on one shared four-core VM.</b> Network namespaces, not machines. The
+      fsync arithmetic that sets the knee is real; the absolute rate belongs to this host
+      and would move on any other.
+      <span class="where">bench/ramp.sh</span>
+    </li>
+    <li>
+      <b>Twenty seconds a step.</b> Long enough to see a steady state at the rates that
+      hold, short enough that a step past the knee inherits the previous one's backlog.
+      That is exactly what the 1200 row shows.
+      <span class="where">bench/ramp.csv</span>
+    </li>
+    <li>
+      <b>There is no admission control.</b> The system has no way to shed load it cannot
+      take, which is why the failure past the knee is collapse rather than a queue. Known,
+      not implemented.
+      <span class="where">README.md</span>
+    </li>
+    <li>
+      <b>Loss is tested at one rate.</b> 200 a second, chosen to isolate loss from
+      saturation. How loss and load interact near the knee is not measured here.
+      <span class="where">bench/loss_matrix.sh</span>
+    </li>
+  </ul>
+</section>
+
+<footer class="gut">
+  <span>
+    <a href="https://github.com/lgoyal6/tautq">github.com/lgoyal6/tautq</a>
+    &middot; MIT
+  </span>
+  <span>
+    also: <a href="https://lgoyal6.github.io/taut/">taut</a>
+    &middot; <a href="https://lgoyal6.github.io/strata/">strata</a>
+    &middot; <a href="https://lgoyal6.github.io/tollgate/">tollgate</a>
+  </span>
+</footer>
+
+<script src="app.js"></script>
+</body>
+</html>
