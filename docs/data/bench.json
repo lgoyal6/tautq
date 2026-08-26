@@ -1,0 +1,164 @@
+{
+ "knee_rate": 800,
+ "ramp": [
+  {
+   "rate": 100.0,
+   "offered": 2000.0,
+   "accepted": 2000.0,
+   "errors": 0.0,
+   "completed": 2000.0,
+   "p50_ms": 28.7,
+   "p95_ms": 60.4,
+   "p99_ms": 63.3,
+   "completed_all": true,
+   "suspect": false,
+   "no_completions": false
+  },
+  {
+   "rate": 200.0,
+   "offered": 4000.0,
+   "accepted": 4000.0,
+   "errors": 0.0,
+   "completed": 4000.0,
+   "p50_ms": 28.2,
+   "p95_ms": 60.5,
+   "p99_ms": 63.5,
+   "completed_all": true,
+   "suspect": false,
+   "no_completions": false
+  },
+  {
+   "rate": 400.0,
+   "offered": 8000.0,
+   "accepted": 8000.0,
+   "errors": 0.0,
+   "completed": 8000.0,
+   "p50_ms": 25.7,
+   "p95_ms": 59.8,
+   "p99_ms": 63.3,
+   "completed_all": true,
+   "suspect": false,
+   "no_completions": false
+  },
+  {
+   "rate": 600.0,
+   "offered": 12000.0,
+   "accepted": 12000.0,
+   "errors": 0.0,
+   "completed": 12000.0,
+   "p50_ms": 27.7,
+   "p95_ms": 60.1,
+   "p99_ms": 63.3,
+   "completed_all": true,
+   "suspect": false,
+   "no_completions": false
+  },
+  {
+   "rate": 800.0,
+   "offered": 16000.0,
+   "accepted": 16000.0,
+   "errors": 0.0,
+   "completed": 16000.0,
+   "p50_ms": 29.7,
+   "p95_ms": 62.4,
+   "p99_ms": 106.7,
+   "completed_all": true,
+   "suspect": false,
+   "no_completions": false
+  },
+  {
+   "rate": 1000.0,
+   "offered": 2960.0,
+   "accepted": 2931.0,
+   "errors": 29.0,
+   "completed": 0.0,
+   "p50_ms": null,
+   "p95_ms": null,
+   "p99_ms": null,
+   "completed_all": false,
+   "suspect": true,
+   "no_completions": true
+  },
+  {
+   "rate": 1200.0,
+   "offered": 2395.0,
+   "accepted": 2376.0,
+   "errors": 19.0,
+   "completed": 11261.0,
+   "p50_ms": 38.9,
+   "p95_ms": 35825.8,
+   "p99_ms": 59594.0,
+   "completed_all": true,
+   "suspect": true,
+   "no_completions": false
+  }
+ ],
+ "loss": [
+  {
+   "loss": 0.0,
+   "rate": 200.0,
+   "offered": 4000.0,
+   "accepted": 4000.0,
+   "errors": 0.0,
+   "completed": 4000.0,
+   "p50_ms": 26.8,
+   "p95_ms": 60.2,
+   "p99_ms": 63.4,
+   "completed_all": true
+  },
+  {
+   "loss": 0.01,
+   "rate": 200.0,
+   "offered": 4000.0,
+   "accepted": 4000.0,
+   "errors": 0.0,
+   "completed": 4000.0,
+   "p50_ms": 26.8,
+   "p95_ms": 62.3,
+   "p99_ms": 116.1,
+   "completed_all": true
+  },
+  {
+   "loss": 0.05,
+   "rate": 200.0,
+   "offered": 4000.0,
+   "accepted": 4000.0,
+   "errors": 0.0,
+   "completed": 4000.0,
+   "p50_ms": 27.2,
+   "p95_ms": 60.9,
+   "p99_ms": 74.0,
+   "completed_all": true
+  },
+  {
+   "loss": 0.1,
+   "rate": 200.0,
+   "offered": 4000.0,
+   "accepted": 4000.0,
+   "errors": 0.0,
+   "completed": 4000.0,
+   "p50_ms": 29.9,
+   "p95_ms": 79.1,
+   "p99_ms": 127.4,
+   "completed_all": true
+  },
+  {
+   "loss": 0.2,
+   "rate": 200.0,
+   "offered": 3992.0,
+   "accepted": 3992.0,
+   "errors": 0.0,
+   "completed": 3999.0,
+   "p50_ms": 65.2,
+   "p95_ms": 632.9,
+   "p99_ms": 1019.2,
+   "completed_all": true
+  }
+ ],
+ "setup": {
+  "nodes": 5,
+  "host": "5-node netns cluster on a shared 4-core VM",
+  "step_seconds": 20,
+  "loss_rate": 200
+ }
+}
