@@ -88,6 +88,9 @@ Numbers come from the committed CSVs in `bench/` (open-loop generator, latency m
 the cluster's own submit→DONE histograms, quantiles from scrape deltas). Reproduce:
 `bench/ramp.sh` and `bench/loss_matrix.sh`.
 
+**[See it: lgoyal6.github.io/tautq](https://lgoyal6.github.io/tautq/)** - the ramp, the loss
+matrix, and the two suspect rows shown as what they are.
+
 ### Sustained-rate ramp (knee point)
 
 ![latency vs offered rate](bench/ramp.png)
