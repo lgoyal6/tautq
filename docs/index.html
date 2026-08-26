@@ -11,7 +11,22 @@
 </head>
 <body>
 
-<header class="gut">
+<nav class="topbar">
+  <a class="brand" href="https://lakshgoyal.com">Laksh Goyal<span>.</span></a>
+  <div class="navlinks">
+    <a href="https://github.com/lgoyal6/tautq">GitHub</a>
+    <a href="https://www.linkedin.com/in/lakshgoyal">LinkedIn</a>
+  </div>
+</nav>
+<nav class="tabs" aria-label="Sections">
+    <a href="#sec-home">Home</a>
+    <a href="#sec-ramp">The ramp</a>
+    <a href="#sec-loss">Packet loss</a>
+    <a href="#sec-suspect">Unpublished</a>
+    <a href="#sec-limits">Limits</a>
+</nav>
+
+<header id="sec-home" class="gut">
   <div>
     <div class="eyebrow">lgoyal6 / tautq</div>
     <h1>tautq<span class="dot">.</span></h1>
@@ -34,7 +49,7 @@
   </dl>
 </header>
 
-<section class="gut">
+<section class="gut" id="sec-ramp">
   <div class="eyebrow">Figure 1</div>
   <h2>The ramp, and where it stops holding</h2>
   <p class="lead">
@@ -89,7 +104,7 @@
   </div>
 </section>
 
-<section class="gut">
+<section class="gut" id="sec-loss">
   <div class="eyebrow">Figure 2</div>
   <h2>What packet loss costs</h2>
   <p class="lead">
@@ -141,7 +156,7 @@
   </div>
 </section>
 
-<section class="gut">
+<section class="gut" id="sec-suspect">
   <div class="eyebrow">Figure 3</div>
   <h2>The rows that are not published</h2>
   <p class="lead">
@@ -165,7 +180,7 @@
   </div>
 </section>
 
-<section class="gut">
+<section class="gut" id="sec-limits">
   <div class="eyebrow">Figure 4</div>
   <h2>Where it loses</h2>
   <ul class="map">
@@ -208,5 +223,6 @@
 </footer>
 
 <script src="app.js"></script>
+<script src="nav.js"></script>
 </body>
 </html>
