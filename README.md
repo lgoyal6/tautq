@@ -1,3 +1,10 @@
+<a href="https://lgoyal6.github.io/tautq/">
+  <img alt="tautq - open the live demo" src="docs/og.png">
+</a>
+
+**[Open the live demo](https://lgoyal6.github.io/tautq/)** - The ramp, the loss
+matrix, and the two suspect rows shown as what they are.
+
 # tautq
 
 [![ci](https://github.com/lgoyal6/tautq/actions/workflows/ci.yml/badge.svg)](https://github.com/lgoyal6/tautq/actions/workflows/ci.yml)
@@ -87,9 +94,6 @@ treats Dead as terminal, so a SIGKILLed node could never rejoin at all.
 Numbers come from the committed CSVs in `bench/` (open-loop generator, latency measured by
 the cluster's own submit→DONE histograms, quantiles from scrape deltas). Reproduce:
 `bench/ramp.sh` and `bench/loss_matrix.sh`.
-
-**[See it: lgoyal6.github.io/tautq](https://lgoyal6.github.io/tautq/)** - the ramp, the loss
-matrix, and the two suspect rows shown as what they are.
 
 ### Sustained-rate ramp (knee point)
 
