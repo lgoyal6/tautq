@@ -1,16 +1,16 @@
 @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Inter:wght@300;400;500;600&display=swap');
 
 :root {
-  --paper: #0e0f11;
-  --panel: #15171a;
-  --ink: #e8eaed;
-  --sub: #9aa1ab;
-  --faint: #6b727c;
-  --rule: #242830;
-  --hair: #242830;
-  --grid: #1e2229;
-  --ox: #909f96;
-  --ox-dim: #3f5a4a;
+  --paper: #101d31;
+  --panel: #17273e;
+  --ink: #e6edf8;
+  --sub: #9db0c8;
+  --faint: #6c819c;
+  --rule: #24374f;
+  --hair: #24374f;
+  --grid: #1c2c44;
+  --ox: #6fbf95;
+  --ox-dim: #2c6045;
   --ok: #5fbf85;
   --warn: #d4a75f;
   --bad: #e0705c;
@@ -184,3 +184,8 @@ html { scroll-padding-top: 96px; }
   html { scroll-behavior: auto; }
   .tabs a, .navlinks a { transition: none; }
 }
+
+/* Brand marks in the nav, sized to the text and inheriting its colour. */
+.navlinks a { display: inline-flex; align-items: center; gap: 7px; }
+.navlinks svg { width: 15px; height: 15px; flex: 0 0 auto; }
+.brand { letter-spacing: .005em; }
