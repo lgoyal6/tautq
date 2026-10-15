@@ -28,6 +28,10 @@ class JobStore {
     // Append (durable if sync) then apply. Returns false only on IO failure.
     bool commit(const Record& r, bool sync = true);
 
+    // Replace transition history with one full-state record per retained job. All
+    // idempotency keys and live lease fences are retained; disk remains O(unique jobs).
+    bool compact(const Wal::CompactHook& hook = {});
+
     Job* find(const JobId& id);
     const Job* find(const JobId& id) const;
     Job* find_by_idem(const std::string& key);

@@ -151,6 +151,47 @@ TEST_F(WalTest, RotatesSegmentsAndReplaysAcrossThem) {
     }
 }
 
+TEST_F(WalTest, RotationAfterCompactionSyncsTheActiveGenerationDirectory) {
+    tautq::Wal w;
+    w.set_segment_bytes(32);
+    std::vector<std::string> synced;
+    w.set_directory_sync_hook_for_test([&](const std::string& path) {
+        synced.push_back(path);
+        return true;
+    });
+    ASSERT_TRUE(replay_all(w).empty());
+    ASSERT_TRUE(w.append(body("before")));
+    ASSERT_TRUE(w.compact({body("snapshot")}));
+    synced.clear();
+
+    ASSERT_TRUE(w.append(body(std::string(20, 'x')))); // forces rotation in wal-gen-1
+    const std::string generation = dir + "/wal-gen-00000000000000000001";
+    ASSERT_EQ(synced.size(), 1u);
+    EXPECT_EQ(synced[0], generation);
+}
+
+TEST_F(WalTest, FailedCurrentParentSyncFailStopsUntilReopen) {
+    tautq::Wal w;
+    ASSERT_TRUE(replay_all(w).empty());
+    ASSERT_TRUE(w.append(body("before")));
+    int root_syncs = 0;
+    w.set_directory_sync_hook_for_test([&](const std::string& path) {
+        if (path == dir && ++root_syncs == 2)
+            return false;
+        return true;
+    });
+
+    EXPECT_FALSE(w.compact({body("snapshot")}));
+    EXPECT_FALSE(w.append(body("must-not-be-acknowledged")));
+
+    tautq::Wal reopened;
+    std::vector<std::string> recovered;
+    ASSERT_TRUE(
+        reopened.open(dir, [&](std::span<const std::byte> b) { recovered.push_back(str(b)); }));
+    ASSERT_EQ(recovered.size(), 1u);
+    EXPECT_EQ(recovered[0], "snapshot");
+}
+
 TEST_F(WalTest, RejectsOversizedAndEmptyBodies) {
     tautq::Wal w;
     ASSERT_TRUE(replay_all(w).empty());
