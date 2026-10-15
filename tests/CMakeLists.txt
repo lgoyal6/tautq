@@ -11,10 +11,12 @@ add_executable(tautq_unit
     unit/wire_test.cc
     unit/demux_test.cc
     unit/rpc_test.cc
+    unit/swim_membership_test.cc
     unit/records_test.cc
     unit/wal_test.cc
     unit/compaction_test.cc
     unit/submit_test.cc
+    unit/status_test.cc
     unit/lease_test.cc
     unit/failover_test.cc
     unit/http_test.cc

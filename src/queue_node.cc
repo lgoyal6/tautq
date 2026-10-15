@@ -1,5 +1,6 @@
 #include "queue_node.h"
 
+#include <algorithm>
 #include <utility>
 
 #include "bytes.h"
@@ -21,6 +22,9 @@ QueueNode::QueueNode(taut::UdpTransport& socket, Membership& membership, NodeCon
     });
     rpc_.on_request(Method::FwdAck, [this](const RpcNode::ReqCtx& ctx, taut::ByteSpan body) {
         handle_fwd_ack(ctx, body);
+    });
+    rpc_.on_request(Method::FwdStatus, [this](const RpcNode::ReqCtx& ctx, taut::ByteSpan body) {
+        handle_fwd_status(ctx, body);
     });
     rpc_.on_request(Method::Claim, [this](const RpcNode::ReqCtx& ctx, taut::ByteSpan body) {
         handle_claim(ctx, body);
@@ -120,6 +124,25 @@ void QueueNode::on_peer_dead(const taut::Endpoint& peer) {
     }
 }
 
+void QueueNode::on_peer_alive(const taut::Endpoint& peer) {
+    std::vector<JobId> to_repair;
+    for (const auto& [id, job] : store_.jobs()) {
+        if (!owned_by_me(job))
+            continue;
+        for (const auto& replica : job.replicas) {
+            if (replica == peer) {
+                to_repair.push_back(id);
+                break;
+            }
+        }
+    }
+    for (const auto& id : to_repair) {
+        // Conservatively resend all pinned copies. This also repairs completions and
+        // idempotency state after the returning replica lost its entire WAL.
+        repair_[id] = 0;
+    }
+}
+
 // ---- submit path ---------------------------------------------------------------------------
 
 std::vector<std::byte> QueueNode::encode_params(const SubmitParams& p) {
@@ -190,14 +213,18 @@ void QueueNode::submit(SubmitParams p, SubmitCb cb) {
         // A draining node routes new work away from itself.
         std::erase(alive, cfg_.self);
     }
-    const taut::Endpoint owner = ring::owner_for(p.idem_key, alive);
-    if (owner == cfg_.self || owner == taut::Endpoint{}) {
+    const taut::Endpoint owner = ring::owner_for(p.idem_key, mem_.members());
+    if (owner == cfg_.self) {
         owner_submit(std::move(p), std::move(cb));
+        return;
+    }
+    if (owner == taut::Endpoint{} || !mem_.is_alive(owner)) {
+        cb(qstatus::kNoQuorum, JobId{});
         return;
     }
     const auto frame = encode_params(p);
     rpc_.call(owner, Method::FwdSubmit, frame, cfg_.rpc_timeout,
-              [this, p = std::move(p), cb](std::uint32_t st, taut::ByteSpan body) mutable {
+              [cb = std::move(cb)](std::uint32_t st, taut::ByteSpan body) mutable {
                   if (st < 0xFFFF0000) {
                       JobId id{};
                       if (body.size() >= kJobIdSize) {
@@ -206,11 +233,54 @@ void QueueNode::submit(SubmitParams p, SubmitCb cb) {
                       cb(st, id);
                       return;
                   }
-                  // Ring owner unreachable: own it here rather than fail the client
-                  // (DESIGN-protocol §2). If the owner actually created the job before
-                  // dying, both jobs carry the same idem key — the receiver's dedup key
-                  // still holds; disclosed as best-effort dedup under failure.
-                  owner_submit(std::move(p), std::move(cb));
+                  // A transport failure is ambiguous: the owner may have durably accepted
+                  // the request but lost its reply. Retrying at this gateway must not mint
+                  // a second ID. Keeping the stable owner fixed preserves dedup at the cost
+                  // of availability until that owner returns.
+                  cb(qstatus::kNoQuorum, JobId{});
+              });
+}
+
+void QueueNode::status(const JobId& id, StatusCb cb) {
+    taut::Endpoint origin{};
+    origin.addr_be = static_cast<std::uint32_t>(id.origin >> 16);
+    origin.port_be = static_cast<std::uint16_t>(id.origin);
+    std::vector<taut::Endpoint> targets{origin};
+    for (const auto& member : mem_.alive()) {
+        if (std::find(targets.begin(), targets.end(), member) == targets.end()) {
+            targets.push_back(member);
+        }
+    }
+    query_status_target(id, targets, 0, std::nullopt, std::move(cb));
+}
+
+void QueueNode::query_status_target(const JobId& id, std::vector<taut::Endpoint> targets,
+                                    std::size_t index, std::optional<Job> best, StatusCb cb) {
+    if (index >= targets.size()) {
+        cb(best ? qstatus::kCreated : qstatus::kUnknownJob, best);
+        return;
+    }
+    const auto target = targets[index];
+    if (target == cfg_.self) {
+        if (const Job* local = store_.find(id);
+            local != nullptr && (!best || job_advances(*best, *local))) {
+            best = *local;
+        }
+        query_status_target(id, targets, index + 1, std::move(best), std::move(cb));
+        return;
+    }
+    std::vector<std::byte> body;
+    put_job_id(body, id);
+    rpc_.call(target, Method::FwdStatus, body, cfg_.rpc_timeout,
+              [this, id, targets = std::move(targets), index, best = std::move(best),
+               cb = std::move(cb)](std::uint32_t code, taut::ByteSpan response) mutable {
+                  Job remote;
+                  if (code == qstatus::kCreated && get_job(response, 0, remote) != 0 &&
+                      remote.id == id && (!best || job_advances(*best, remote))) {
+                      best = std::move(remote);
+                  }
+                  query_status_target(id, std::move(targets), index + 1, std::move(best),
+                                      std::move(cb));
               });
 }
 
@@ -231,9 +301,8 @@ void QueueNode::owner_submit(SubmitParams p, SubmitCb cb) {
     j.max_attempts = p.max_attempts != 0 ? p.max_attempts : cfg_.default_max_attempts;
     j.replicas = ring::replica_set(j.idem_key, mem_.alive());
     if (j.replicas[0] != cfg_.self) {
-        // Owning off-ring (fallback path): pin ourselves as owner and fill the remaining
-        // slots with the first distinct alive nodes — ring order stops mattering the moment
-        // the set is pinned in the record.
+        // The stable owner may not be first in the live-only replica ring after a failure.
+        // Keep this node as owner and choose the remaining currently reachable replicas.
         std::array<taut::Endpoint, 3> set{cfg_.self, taut::Endpoint{}, taut::Endpoint{}};
         std::size_t slot = 1;
         for (const auto& n : mem_.alive()) {
@@ -642,6 +711,21 @@ void QueueNode::handle_fwd_ack(const RpcNode::ReqCtx& ctx, taut::ByteSpan body) 
     }
     owner_ack(id, epoch, seq, success,
               [this, ctx](std::uint32_t code) { rpc_.respond(ctx, code, {}); });
+}
+
+void QueueNode::handle_fwd_status(const RpcNode::ReqCtx& ctx, taut::ByteSpan body) {
+    if (body.size() < kJobIdSize) {
+        rpc_.respond(ctx, qstatus::kInvalid, {});
+        return;
+    }
+    const Job* job = store_.find(get_job_id(body, 0));
+    if (job == nullptr) {
+        rpc_.respond(ctx, qstatus::kUnknownJob, {});
+        return;
+    }
+    std::vector<std::byte> response;
+    put_job(response, *job);
+    rpc_.respond(ctx, qstatus::kCreated, response);
 }
 
 void QueueNode::owner_ack(const JobId& id, std::uint32_t epoch, std::uint32_t lease_seq,

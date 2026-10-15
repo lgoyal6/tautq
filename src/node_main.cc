@@ -24,6 +24,7 @@
 #include "loop.h"
 #include "metrics.h"
 #include "queue_node.h"
+#include "swim_membership.h"
 
 using namespace tautq;
 
@@ -61,32 +62,6 @@ taut::Endpoint data_ep(const taut::Endpoint& swim) {
     e.port_be = htons(static_cast<std::uint16_t>(ntohs(swim.port_be) - 1));
     return e;
 }
-
-// Ring/replica liveness backed by taut's SWIM (data-plane endpoints; SWIM speaks port+1).
-class SwimMembership : public Membership {
-  public:
-    SwimMembership(taut::Swim& swim, taut::Endpoint self_data) : swim_(swim), self_(self_data) {}
-
-    std::vector<taut::Endpoint> alive() const override {
-        std::vector<taut::Endpoint> out{self_};
-        for (const auto& [ep, st] : swim_.snapshot()) {
-            if (st == taut::MemberState::Alive) {
-                out.push_back(data_ep(ep));
-            }
-        }
-        return out;
-    }
-    bool is_alive(const taut::Endpoint& e) const override {
-        if (e == self_) {
-            return true;
-        }
-        return swim_.state_of(swim_ep(e)) == taut::MemberState::Alive;
-    }
-
-  private:
-    taut::Swim& swim_;
-    taut::Endpoint self_;
-};
 
 const char* state_str(JobState s) {
     switch (s) {
@@ -191,7 +166,9 @@ int main(int argc, char** argv) {
 
     taut::SwimConfig swim_cfg; // reference defaults: T=1s, ping 300ms, suspicion 3s, k=3
     taut::Swim swim(swim_sock, swim_ep(*self), swim_cfg, boot);
-    SwimMembership membership(swim, *self);
+    std::vector<taut::Endpoint> configured{*self};
+    configured.insert(configured.end(), peers.begin(), peers.end());
+    SwimMembership membership(swim, *self, std::move(configured));
     QueueNode queue(
         data_sock, membership,
         [&] {
@@ -213,6 +190,8 @@ int main(int argc, char** argv) {
                      static_cast<int>(st));
         if (st == taut::MemberState::Dead) {
             queue.on_peer_dead(data_ep(ep));
+        } else if (st == taut::MemberState::Alive) {
+            queue.on_peer_alive(data_ep(ep));
         }
     });
     for (const auto& p : peers) {
@@ -293,16 +272,17 @@ int main(int argc, char** argv) {
             re(400, "text/plain", "bad id\n", {});
             return;
         }
-        const Job* j = queue.store().find(id);
-        if (j == nullptr) {
-            re(404, "application/json", "{\"error\":\"unknown\"}\n", {});
-            return;
-        }
-        re(200, "application/json",
-           std::string("{\"id\":\"") + to_hex(id) + "\",\"state\":\"" + state_str(j->state) +
-               "\",\"epoch\":" + std::to_string(j->epoch) + ",\"attempts\":" +
-               std::to_string(j->attempts) + ",\"owner\":\"" + ep_str(j->owner) + "\"}\n",
-           {});
+        queue.status(id, [re, id](std::uint32_t status, const std::optional<Job>& job) {
+            if (status != qstatus::kCreated || !job) {
+                re(404, "application/json", "{\"error\":\"unknown\"}\n", {});
+                return;
+            }
+            re(200, "application/json",
+               std::string("{\"id\":\"") + to_hex(id) + "\",\"state\":\"" + state_str(job->state) +
+                   "\",\"epoch\":" + std::to_string(job->epoch) + ",\"attempts\":" +
+                   std::to_string(job->attempts) + ",\"owner\":\"" + ep_str(job->owner) + "\"}\n",
+               {});
+        });
     });
     http.route("GET", "/v1/nodes", [&](const HttpServer::Request&, HttpServer::Respond re) {
         std::string out = "[";

@@ -172,10 +172,14 @@ curl http://localhost:8080/v1/jobs/<id>
   (submits fail over to reachable owners) rather than risk double execution.
 - **Job payloads ≤ 640 B** in v1 - a job is a task descriptor that must fit one taut
   datagram; chunked bodies are future work.
-- **No log compaction yet** - segments rotate but completed jobs are never pruned.
-- **Dedup is best-effort under churn:** if the ring owner is unreachable at submit, the
-  gateway owns the job locally; a concurrent retry through another gateway can create a
-  second job with the same idempotency key (the receiver's dedup key still holds).
+- **The internal JobStore WAL compaction retains one full-state record per job, including completed-job idempotency
+  keys and active lease fences.** This bounds transition-history replay to O(unique jobs), but
+  total retained state and disk usage remain O(unique jobs); no TTL or automatic compaction
+  policy is defined in v1.
+- **Submission dedup keeps a stable configured owner under liveness churn:** if that owner
+  is unavailable, gateways refuse the submit with a retryable 503 instead of creating a
+  second job elsewhere. This favors duplicate prevention over availability until the owner
+  returns. Adding or removing configured members still requires a coordinated migration.
 - Quorum-failed lease attempts consume `lease_seq` (never double-grants, but repeated
   quorum failure can dead-letter a job that never ran; the membership gate + backoff make
   this need ~5 separate partitions to happen).

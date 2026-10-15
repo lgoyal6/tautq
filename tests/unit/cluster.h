@@ -24,17 +24,25 @@ inline taut::Endpoint ep(std::uint16_t port) {
     return e;
 }
 
-struct Cluster {
+struct DynamicMembership : StaticMembership {
+    using StaticMembership::StaticMembership;
+
+    std::vector<taut::Endpoint> members() const override {
+        return alive();
+    }
+};
+
+template <typename MembershipImpl> struct BasicCluster {
     taut::SimNet net;
     std::vector<taut::Endpoint> eps;
-    std::vector<std::unique_ptr<StaticMembership>> mems;
+    std::vector<std::unique_ptr<MembershipImpl>> mems;
     std::vector<std::unique_ptr<QueueNode>> nodes;
     std::vector<bool> down;
     std::string base_dir;
     std::uint64_t next_boot = 0xB000;
 
-    Cluster(std::uint64_t seed, taut::Impairments imp, int n, const std::string& name,
-            NodeConfig proto = {})
+    BasicCluster(std::uint64_t seed, taut::Impairments imp, int n, const std::string& name,
+                 NodeConfig proto = {})
         : net(seed, imp) {
         base_dir = (std::filesystem::temp_directory_path() / ("tautq-" + name)).string();
         std::filesystem::remove_all(base_dir);
@@ -43,7 +51,7 @@ struct Cluster {
             eps.push_back(ep(static_cast<std::uint16_t>(9000 + i)));
         }
         for (int i = 0; i < n; ++i) {
-            mems.push_back(std::make_unique<StaticMembership>(eps));
+            mems.push_back(std::make_unique<MembershipImpl>(eps));
             NodeConfig cfg = proto;
             cfg.self = eps[static_cast<std::size_t>(i)];
             cfg.data_dir = base_dir + "/node" + std::to_string(i);
@@ -55,7 +63,7 @@ struct Cluster {
             down.push_back(false);
         }
     }
-    ~Cluster() {
+    ~BasicCluster() {
         nodes.clear();
         std::filesystem::remove_all(base_dir);
     }
@@ -165,5 +173,8 @@ struct Cluster {
         std::abort();
     }
 };
+
+using Cluster = BasicCluster<StaticMembership>;
+using DynamicCluster = BasicCluster<DynamicMembership>;
 
 } // namespace tautq::test

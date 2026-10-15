@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <string>
@@ -9,9 +10,9 @@
 
 namespace tautq {
 
-// Consistent-hash ring over the alive membership (DESIGN-protocol §2, D2). Consulted ONLY
-// at submit time: it picks the job's owner (cross-node idempotency dedup under stable
-// membership) and the replica set, which is then pinned in the job record forever — no
+// Consistent-hash ring over the configured membership (DESIGN-protocol §2, D2). Consulted
+// at submit time to pick a stable idempotency owner; replica placement uses the currently
+// alive set and is then pinned in the job record forever — no
 // range handoff, ever. Node positions come from mixing the endpoint key; the key's hash
 // walks to its successor.
 namespace ring {
@@ -35,12 +36,18 @@ class Membership {
     virtual ~Membership() = default;
     // Every node currently believed Alive, INCLUDING self. Order does not matter.
     virtual std::vector<taut::Endpoint> alive() const = 0;
+    // Stable configured membership used for idempotency ownership. It must not shrink
+    // when a node is suspected or declared dead.
+    virtual std::vector<taut::Endpoint> members() const {
+        return alive();
+    }
     virtual bool is_alive(const taut::Endpoint& e) const = 0;
 };
 
 class StaticMembership : public Membership {
   public:
-    explicit StaticMembership(std::vector<taut::Endpoint> nodes) : nodes_(std::move(nodes)) {}
+    explicit StaticMembership(std::vector<taut::Endpoint> nodes)
+        : nodes_(nodes), members_(std::move(nodes)) {}
 
     std::vector<taut::Endpoint> alive() const override {
         return nodes_;
@@ -53,12 +60,21 @@ class StaticMembership : public Membership {
         }
         return false;
     }
+    std::vector<taut::Endpoint> members() const override {
+        return members_;
+    }
     void set(std::vector<taut::Endpoint> nodes) {
+        for (const auto& n : nodes) {
+            if (std::find(members_.begin(), members_.end(), n) == members_.end()) {
+                members_.push_back(n);
+            }
+        }
         nodes_ = std::move(nodes);
     }
 
   private:
     std::vector<taut::Endpoint> nodes_;
+    std::vector<taut::Endpoint> members_;
 };
 
 } // namespace tautq
