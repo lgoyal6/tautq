@@ -1,3 +1,4 @@
+#include <filesystem>
 #include <optional>
 
 #include <gtest/gtest.h>
@@ -155,11 +156,11 @@ TEST(Failover, TakeoverInheritsCommittedLeaseNoDoubleGrant) {
               tautq::JobState::Done);
 }
 
-// Crown test 2 — the fencing story: a frozen owner thaws after a takeover and still
+// Crown test 2 — the fencing story: a falsely suspected owner stays live and still
 // believes it owns the job (its own membership view never changed). Every lease it tries
 // to commit is rejected by the replicas' epoch check; it cannot grant, and resync demotes
 // it. Meanwhile the real owner operates normally.
-TEST(Failover, StaleOwnerCannotGrantAfterTakeover) {
+TEST(Failover, SuspectedOwnerIsFencedAfterSurvivorsClaim) {
     Cluster c(23, taut::Impairments{.delay = 2ms}, 3, "fo-fence");
     const std::string key = c.key_owned_by(0, "f");
     const auto id = must_submit(c, 0, params(key));
@@ -167,8 +168,8 @@ TEST(Failover, StaleOwnerCannotGrantAfterTakeover) {
         c.step();
     }
 
-    // Node 0 freezes (partition). Only the survivors' views change.
-    c.crash(0);
+    // False SWIM suspicion: only the survivors' views change. The suspected owner stays
+    // live and continues believing the full membership is present.
     c.set_node_membership(1, {1, 2});
     c.set_node_membership(2, {1, 2});
     c.declare_dead_at({1, 2}, 0);
@@ -183,8 +184,7 @@ TEST(Failover, StaleOwnerCannotGrantAfterTakeover) {
     ASSERT_EQ(c.nodes[static_cast<std::size_t>(suc)]->store().find(id)->owner,
               c.eps[static_cast<std::size_t>(suc)]);
 
-    // The frozen owner thaws, still seeing everyone alive and itself as owner@epoch 1.
-    c.down[0] = false;
+    // The false-positive owner still sees everyone alive and itself as owner@epoch 1.
     const auto stale = try_lease(c, 0, /*worker=*/9);
     EXPECT_EQ(stale.st.value_or(999), tautq::qstatus::kNoQuorum)
         << "every replica must fence the stale owner's lease with kStaleEpoch";
@@ -205,6 +205,39 @@ TEST(Failover, StaleOwnerCannotGrantAfterTakeover) {
     ASSERT_EQ(r.st.value_or(999), tautq::qstatus::kCreated);
     EXPECT_EQ(try_ack(c, suc, id, r.grant.epoch, r.grant.lease_seq, true).value_or(999),
               tautq::qstatus::kCreated);
+}
+
+TEST(Failover, ReturningReplicaWithLostDiskRepairsFromOwner) {
+    Cluster c(27, taut::Impairments{.delay = 2ms}, 3, "fo-disk-loss");
+    const std::string key = c.key_owned_by(0, "disk-loss");
+    const auto id = must_submit(c, 0, params(key));
+    for (int i = 0; i < 1200 && c.nodes[0]->repair_backlog() > 0; ++i)
+        c.step();
+    const auto* accepted = c.nodes[0]->store().find(id);
+    ASSERT_NE(accepted, nullptr);
+    int replica = -1;
+    for (const auto& peer : accepted->replicas) {
+        for (std::size_t i = 1; i < c.eps.size(); ++i) {
+            if (peer == c.eps[i])
+                replica = static_cast<int>(i);
+        }
+    }
+    ASSERT_GE(replica, 1);
+
+    c.crash(replica);
+    c.nodes[static_cast<std::size_t>(replica)].reset();
+    std::filesystem::remove_all(c.base_dir + "/node" + std::to_string(replica));
+    c.restart(replica);
+    EXPECT_EQ(c.nodes[static_cast<std::size_t>(replica)]->store().find(id), nullptr)
+        << "the returning node starts with a genuinely empty WAL";
+
+    c.nodes[0]->on_peer_alive(c.eps[static_cast<std::size_t>(replica)]);
+    for (int i = 0; i < 1200 && c.nodes[0]->repair_backlog() > 0; ++i)
+        c.step();
+    const auto* repaired = c.nodes[static_cast<std::size_t>(replica)]->store().find_by_idem(key);
+    ASSERT_NE(repaired, nullptr);
+    EXPECT_EQ(repaired->id, id);
+    EXPECT_EQ(repaired->state, tautq::JobState::Ready);
 }
 
 // Stale-log restart (chaos scenario d): the old owner restarts from a log that predates

@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cstdint>
 #include <functional>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -50,6 +51,7 @@ class QueueNode {
     };
     // (status, job id). id is valid for kCreated/kDuplicate.
     using SubmitCb = std::function<void(std::uint32_t status, const JobId& id)>;
+    using StatusCb = std::function<void(std::uint32_t status, const std::optional<Job>& job)>;
 
     QueueNode(taut::UdpTransport& socket, Membership& membership, NodeConfig cfg,
               std::uint64_t boot_id);
@@ -61,9 +63,13 @@ class QueueNode {
     void tick();
 
     // Client-facing submit (the HTTP layer calls this on whichever node the client hit).
-    // Ring-routes to the owner; falls back to owning locally if the ring owner is
-    // unreachable (dedup degrades to best-effort; duplicates still share the idem key).
+    // Routes to the stable configured owner. If that owner is unavailable, refuse the
+    // submit rather than create a second job under a membership view that excludes it.
     void submit(SubmitParams p, SubmitCb cb);
+
+    // Query the embedded origin owner first, then the remaining alive nodes. The best
+    // replica state is returned so a gateway can answer from any node in the cluster.
+    void status(const JobId& id, StatusCb cb);
 
     // What a worker receives with a granted lease: the job to execute plus the fencing
     // token (epoch, lease_seq) it must present on completion.
@@ -99,6 +105,9 @@ class QueueNode {
     // job the dead peer owned where this node is the deterministic successor (first alive
     // member in the job's pinned replica-set order).
     void on_peer_dead(const taut::Endpoint& peer);
+
+    // A returning peer may have lost its WAL. Re-send owned records to its pinned slots.
+    void on_peer_alive(const taut::Endpoint& peer);
 
     // Graceful shutdown (§3 drain): stop granting leases, route new submits away, and hand
     // every owned non-terminal job to its successor via the ordinary claim path. `done`
@@ -157,6 +166,9 @@ class QueueNode {
     void handle_replicate(const RpcNode::ReqCtx& ctx, taut::ByteSpan body);
     void handle_apply(const RpcNode::ReqCtx& ctx, taut::ByteSpan body);
     void handle_fwd_ack(const RpcNode::ReqCtx& ctx, taut::ByteSpan body);
+    void handle_fwd_status(const RpcNode::ReqCtx& ctx, taut::ByteSpan body);
+    void query_status_target(const JobId& id, std::vector<taut::Endpoint> targets,
+                             std::size_t index, std::optional<Job> best, StatusCb cb);
     void start_replication(const JobId& id, bool track_quorum, SubmitCb cb);
     void send_replicate(const JobId& id, std::size_t slot);
     void repair_tick(TimePoint now);
