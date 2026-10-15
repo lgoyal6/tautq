@@ -1,5 +1,7 @@
 #include "store.h"
 
+#include <algorithm>
+
 namespace tautq {
 
 bool JobStore::open(const std::string& dir) {
@@ -19,6 +21,31 @@ bool JobStore::commit(const Record& r, bool sync) {
     }
     apply(r);
     return true;
+}
+
+bool JobStore::compact(const Wal::CompactHook& hook) {
+    std::vector<Job> retained;
+    retained.reserve(jobs_.size());
+    for (const auto& [id, job] : jobs_) {
+        (void)id;
+        retained.push_back(job);
+    }
+    std::sort(retained.begin(), retained.end(), [this](const Job& a, const Job& b) {
+        if (a.idem_key != b.idem_key)
+            return a.idem_key < b.idem_key;
+        const auto selected = by_idem_.find(a.idem_key);
+        const bool a_selected = selected != by_idem_.end() && a.id == selected->second;
+        const bool b_selected = selected != by_idem_.end() && b.id == selected->second;
+        if (a_selected != b_selected)
+            return !a_selected;
+        return a.id.origin < b.id.origin || (a.id.origin == b.id.origin && a.id.nonce < b.id.nonce);
+    });
+    std::vector<std::vector<std::byte>> snapshot;
+    snapshot.reserve(retained.size());
+    for (std::size_t i = 0; i < retained.size(); ++i) {
+        snapshot.push_back(encode_record(Record{ReplicateRec{retained[i]}}, i));
+    }
+    return wal_.compact(snapshot, hook);
 }
 
 Job* JobStore::find(const JobId& id) {
