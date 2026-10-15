@@ -341,7 +341,7 @@ bool Wal::compact(const std::vector<std::vector<std::byte>>& snapshot, const Com
         names.empty() ? active_dir_ + "/" + segment_name(0) : active_dir_ + "/" + names.back();
     if (!open_active(selected, /*create=*/names.empty()))
         return false;
-    struct stat st{};
+    struct stat st {};
     if (::fstat(fd_, &st) != 0)
         return false;
     active_size_ = static_cast<std::size_t>(st.st_size);
