@@ -208,11 +208,6 @@ void QueueNode::submit(SubmitParams p, SubmitCb cb) {
         cb(qstatus::kInvalid, JobId{});
         return;
     }
-    auto alive = mem_.alive();
-    if (draining_) {
-        // A draining node routes new work away from itself.
-        std::erase(alive, cfg_.self);
-    }
     const taut::Endpoint owner = ring::owner_for(p.idem_key, mem_.members());
     if (owner == cfg_.self) {
         owner_submit(std::move(p), std::move(cb));
@@ -288,6 +283,12 @@ void QueueNode::owner_submit(SubmitParams p, SubmitCb cb) {
     if (Job* existing = store_.find_by_idem(p.idem_key)) {
         counters_.duplicates++;
         cb(qstatus::kDuplicate, existing->id);
+        return;
+    }
+    // Retried keys remain readable during drain; only new admission must stop.
+    // Both local and forwarded submits share this boundary and retain their owner.
+    if (draining_) {
+        cb(qstatus::kNoQuorum, JobId{});
         return;
     }
     counters_.submits++;

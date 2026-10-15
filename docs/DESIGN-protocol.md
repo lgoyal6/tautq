@@ -120,3 +120,13 @@ which is exactly the contract real webhook providers (Stripe/GitHub) publish.
   whose response is lost triggers the §2 local-ownership fallback and two jobs can share
   one idempotency key. The chaos verifier attributes such duplicates explicitly
   (`fallback_twins`) so "zero unexplained duplicates" stays a tight assertion.
+
+- **(2026-10-15) Stable submission ownership and draining admission supersede the
+  alive-member fallback in §2 and the M9 fallback-twin behavior above.** Configured
+  membership fixes the idempotency owner. An unavailable owner yields retryable HTTP
+  503; gateways do not mint a replacement ID. A draining owner returns the original
+  ID for an indexed key but refuses a fresh key with 503 before allocation or WAL
+  append. The same rule applies to forwarded submissions and after the drain callback.
+  A draining gateway can still forward to a different healthy configured owner.
+  TAKEOVER moves execution ownership only. Configured member changes require a
+  coordinated migration; drain does not remove a member from the configured ring.

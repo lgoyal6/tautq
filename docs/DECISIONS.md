@@ -54,3 +54,13 @@ approved by Laksh on 2026-07-27 ("Approve as proposed"). Details: docs/DESIGN-pr
   DEAD_LETTER after max_attempts. Metrics: depth, in-flight leases, replication lag, churn,
   submit→DONE latency histogram (hand-rolled buckets, Grafana computes quantiles).
 - Rationale (Laksh): approved per brief §6.
+
+### D9. Stable idempotency ownership and drain admission (2026-10-15)
+- Configured membership fixes a key's submission owner; unavailable owners return
+  retryable 503. Draining preserves duplicate lookup but refuses fresh owned keys
+  before SUBMIT. Gateways may forward to another healthy configured owner.
+- Execution handoff retains the original job ID and dedup index. It does not migrate
+  key ownership. Changing configured membership requires coordinated migration.
+- Rejected: remapping a retry to live members, which can create a second ID after a
+  lost reply; rejecting indexed duplicates during drain, which admits no new work;
+  and guarding only the public gateway, which misses forwarded owner requests.

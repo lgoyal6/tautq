@@ -109,9 +109,9 @@ class QueueNode {
     // A returning peer may have lost its WAL. Re-send owned records to its pinned slots.
     void on_peer_alive(const taut::Endpoint& peer);
 
-    // Graceful shutdown (§3 drain): stop granting leases, route new submits away, and hand
-    // every owned non-terminal job to its successor via the ordinary claim path. `done`
-    // fires when no owned non-terminal jobs remain.
+    // Graceful shutdown (§3 drain): refuse fresh owned keys and new leases, preserve
+    // duplicate lookups, and hand non-terminal jobs to their pinned successor. Forwarding
+    // to another configured owner remains valid. `done` waits for owned non-terminal jobs.
     using DrainCb = std::function<void()>;
     void drain(DrainCb done);
     bool draining() const {

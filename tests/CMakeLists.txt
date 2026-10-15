@@ -16,6 +16,7 @@ add_executable(tautq_unit
     unit/wal_test.cc
     unit/compaction_test.cc
     unit/submit_test.cc
+    unit/draining_admission_test.cc
     unit/status_test.cc
     unit/lease_test.cc
     unit/failover_test.cc
