@@ -169,7 +169,8 @@ curl http://localhost:8080/v1/jobs/<id>
   inside one replica set can lose an unrepaired job. The third copy is repaired
   asynchronously (`tautq_replication_backlog` gauge).
 - **CP on minority partitions.** An owner that cannot reach any replica stalls its jobs
-  (submits fail over to reachable owners) rather than risk double execution.
+  (submits receive retryable refusal until the configured owner returns) rather than risk
+  double execution.
 - **Job payloads ≤ 640 B** in v1 - a job is a task descriptor that must fit one taut
   datagram; chunked bodies are future work.
 - **The internal JobStore WAL compaction retains one full-state record per job, including completed-job idempotency
