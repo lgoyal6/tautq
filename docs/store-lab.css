@@ -1,0 +1,6 @@
+#store-form {display:flex;flex-wrap:wrap;gap:18px;align-items:end;margin:20px 0}
+#store-form label {display:grid;gap:6px;color:var(--sub);font-size:14px;flex:1 1 180px}
+#store-form input,#store-form select,#store-run {font:inherit;border:1px solid var(--rule);padding:10px;background:var(--paper);color:var(--ink);border-radius:3px;width:100%}
+#store-run {width:auto;background:var(--ox);color:var(--paper);cursor:pointer}
+#store-form :focus-visible {outline:2px solid var(--ox);outline-offset:3px}
+#store-output {white-space:pre-wrap;overflow-wrap:anywhere;font:13px/1.6 var(--mono);margin-top:16px}

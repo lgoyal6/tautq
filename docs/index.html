@@ -14,6 +14,7 @@
 <meta property="og:image" content="https://lgoyal6.github.io/tautq/og.png">
 <meta name="twitter:card" content="summary_large_image">
 <link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="store-lab.css"><script type="module" src="store-lab.js"></script>
 </head>
 <body>
 
@@ -26,7 +27,8 @@
 </nav>
 <nav class="tabs" aria-label="Sections">
     <a href="#sec-home">Home</a>
-    <a href="#sec-ramp">The ramp</a>
+    <a href="#sec-store">Run the store</a>
+    <a href="#sec-ramp">Recorded ramp</a>
     <a href="#sec-loss">Packet loss</a>
     <a href="#sec-suspect">Unpublished</a>
     <a href="#sec-limits">Limits</a>
@@ -54,6 +56,20 @@
     <div class="fact"><dt>the cause</dt><dd>~9 <small>fsyncs per job, cluster-wide</small></dd></div>
   </dl>
 </header>
+
+<section class="gut" id="sec-store">
+<h2>Append, compact, reopen</h2>
+<p class="lead">Run the actual C++ JobStore, record codec and WAL in your browser. Completed jobs receive a delayed lease record: reopening must keep them completed.</p>
+<div class="figure"><form id="store-form">
+<label>Jobs<input id="jobs" type="number" min="1" max="12" value="6" required></label>
+<label>Completed jobs<input id="done" type="number" min="0" max="12" value="2" required></label>
+<label>Lease records per job<input id="cycles" type="number" min="1" max="8" value="3" required></label>
+<label>Before reopening<select id="compact"><option value="1">Compact the log</option><option value="0">Keep the full log</option></select></label>
+<button id="store-run">Run store and reopen</button></form>
+<div role="status" id="store-status">Ready to run synthetic jobs.</div><pre id="store-output"></pre></div>
+<p>These files exist only in a fresh browser worker's virtual filesystem. No cluster, network requests, webhook delivery, physical disk barrier or power-loss experiment runs. WAL bytes are virtual file sizes. The five-node charts below remain recorded measurements.</p>
+<p><a href="https://github.com/lgoyal6/tautq/blob/main/src/store.cc">Owning store source</a> and <a href="https://github.com/lgoyal6/tautq/blob/main/wasm/build.sh">reproducible WASM build</a>.</p>
+</section>
 
 <section class="gut" id="sec-ramp">
   <div class="eyebrow">Figure 1</div>
