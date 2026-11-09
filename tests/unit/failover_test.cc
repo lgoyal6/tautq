@@ -240,6 +240,41 @@ TEST(Failover, ReturningReplicaWithLostDiskRepairsFromOwner) {
     EXPECT_EQ(repaired->state, tautq::JobState::Ready);
 }
 
+TEST(Failover, RestartedStaleReplicaResyncsCompletionWithoutOwnerRestart) {
+    Cluster c(28, taut::Impairments{.delay = 2ms}, 3, "fo-replica-done");
+    const std::string key = c.key_owned_by(0, "replica-done");
+    const auto id = must_submit(c, 0, params(key));
+    for (int i = 0; i < 1200 && c.nodes[0]->repair_backlog() > 0; ++i) {
+        c.step();
+    }
+
+    const int stale = successor_index(c, id, 0);
+    ASSERT_GE(stale, 0);
+    c.crash(stale);
+    const auto lease = try_lease(c, 0);
+    ASSERT_EQ(lease.st.value_or(999), tautq::qstatus::kCreated);
+    ASSERT_EQ(try_ack(c, 0, id, lease.grant.epoch, lease.grant.lease_seq, true).value_or(999),
+              tautq::qstatus::kCreated);
+    ASSERT_EQ(c.nodes[0]->store().find(id)->state, tautq::JobState::Done);
+
+    // Reboot only the lagging replica from its stale WAL. The owner stays up and does not
+    // restart, so convergence must come from the returning replica's startup resync.
+    c.restart(stale);
+    for (int i = 0; i < 1200; ++i) {
+        const auto* j = c.nodes[static_cast<std::size_t>(stale)]->store().find(id);
+        if (j != nullptr && j->state == tautq::JobState::Done) {
+            break;
+        }
+        c.step();
+    }
+    const auto* repaired = c.nodes[static_cast<std::size_t>(stale)]->store().find(id);
+    ASSERT_NE(repaired, nullptr);
+    EXPECT_EQ(repaired->state, tautq::JobState::Done)
+        << "a restarted stale replica must learn the owner's durable completion";
+    EXPECT_EQ(c.nodes[0]->store().find(id)->state, tautq::JobState::Done)
+        << "the owner remains live throughout this repair";
+}
+
 // Stale-log restart (chaos scenario d): the old owner restarts from a log that predates
 // the takeover AND the completion. Startup resync adopts the truth; no re-execution.
 TEST(Failover, RestartFromStaleLogResyncsAndDemotes) {

@@ -4,13 +4,34 @@
 #include <utility>
 
 #include "bytes.h"
+#include "faults.h"
 
 namespace tautq {
+
+const char* refuse_reason_name(RefuseReason r) {
+    switch (r) {
+    case RefuseReason::Inflight:
+        return "inflight";
+    case RefuseReason::Bytes:
+        return "bytes";
+    case RefuseReason::Backlog:
+        return "backlog";
+    case RefuseReason::Wal:
+        return "wal";
+    case RefuseReason::Gateway:
+        return "gateway";
+    case RefuseReason::kCount:
+        break;
+    }
+    return "?";
+}
 
 QueueNode::QueueNode(taut::UdpTransport& socket, Membership& membership, NodeConfig cfg,
                      std::uint64_t boot_id)
     : mem_(membership), cfg_(std::move(cfg)), rpc_(socket, cfg_.self, taut::Config{}, boot_id),
       boot_(boot_id) {
+    store_.set_self(cfg_.self);
+    store_.set_group_commit(cfg_.group_commit);
     rpc_.on_request(Method::FwdSubmit, [this](const RpcNode::ReqCtx& ctx, taut::ByteSpan body) {
         handle_fwd_submit(ctx, body);
     });
@@ -48,6 +69,11 @@ template <typename Fn> void for_each_peer_slot(const Job& j, const taut::Endpoin
         }
     }
 }
+
+bool same_job_version(const Job& a, const Job& b) {
+    return a.id == b.id && a.state == b.state && a.owner == b.owner && a.epoch == b.epoch &&
+           a.lease_seq == b.lease_seq && a.attempts == b.attempts;
+}
 } // namespace
 
 bool QueueNode::open() {
@@ -65,6 +91,12 @@ bool QueueNode::open() {
             continue;
         }
         repair_[id] = 0;
+        bool has_peer = false;
+        for_each_peer_slot(j, cfg_.self,
+                           [&](std::size_t, const taut::Endpoint&) { has_peer = true; });
+        if (has_peer) {
+            unconfirmed_.insert(id);
+        }
         if (j.state == JobState::Ready) {
             ready_.push_back(id);
         } else if (j.state == JobState::Leased) {
@@ -91,6 +123,94 @@ void QueueNode::tick() {
     repair_tick(now);
     claim_tick(now);
     drain_tick(now);
+    // End of the event-loop pass: flush-on-drain. Everything appended during this pass
+    // (HTTP submits, replica RPCs, the ticks above) shares one fsync; waiters run after it.
+    store_.pump(/*end_of_pass=*/true);
+}
+
+// ---- durability barrier plumbing -----------------------------------------------------------
+
+bool QueueNode::commit_local(const JobId& id, const Record& rec, std::function<void(bool)> then) {
+    busy_[id]++;
+    const bool queued = store_.commit_async(rec, [this, id, then = std::move(then)](bool ok) {
+        then(ok);
+        release_job(id);
+    });
+    if (!queued) {
+        release_job(id);
+    }
+    return queued;
+}
+
+bool QueueNode::with_job(const JobId& id, std::function<void()> fn) {
+    if (!job_busy(id)) {
+        fn();
+        return true;
+    }
+    auto& q = parked_[id];
+    if (q.size() >= 64) {
+        counters_.busy_rejects++;
+        return false;
+    }
+    counters_.deferred_ops++;
+    q.push_back(std::move(fn));
+    return true;
+}
+
+void QueueNode::release_job(const JobId& id) {
+    auto it = busy_.find(id);
+    if (it == busy_.end() || --it->second > 0) {
+        return;
+    }
+    busy_.erase(it);
+    // Resume parked work in arrival order until one of them makes the job busy again.
+    while (!job_busy(id)) {
+        auto pit = parked_.find(id);
+        if (pit == parked_.end() || pit->second.empty()) {
+            if (pit != parked_.end()) {
+                parked_.erase(pit);
+            }
+            return;
+        }
+        auto fn = std::move(pit->second.front());
+        pit->second.pop_front();
+        fn();
+    }
+}
+
+std::optional<RefuseReason> QueueNode::admission_check(std::size_t bytes) {
+    const AdmissionConfig& a = cfg_.admission;
+    const std::size_t wal_cap = static_cast<std::size_t>(
+        static_cast<double>(cfg_.group_commit.max_pending_records) * a.wal_submit_share);
+    if (!a.enabled) {
+        return std::nullopt;
+    }
+    const std::size_t backlog = store_.owned_active() + pending_idem_.size();
+    const auto scaled = [](std::size_t limit, double scale) {
+        return static_cast<std::size_t>(static_cast<double>(limit) * scale);
+    };
+    const auto over = [&](double scale) -> std::optional<RefuseReason> {
+        if (inflight_submits_ + 1 > scaled(a.max_inflight_submits, scale))
+            return RefuseReason::Inflight;
+        if (inflight_submit_bytes_ + bytes > scaled(a.max_inflight_submit_bytes, scale))
+            return RefuseReason::Bytes;
+        if (backlog + 1 > scaled(a.max_backlog_jobs, scale))
+            return RefuseReason::Backlog;
+        if (store_.pending_records() + 1 > scaled(wal_cap, scale))
+            return RefuseReason::Wal;
+        return std::nullopt;
+    };
+    if (shedding_) {
+        if (const auto r = over(a.resume_ratio)) {
+            return r;
+        }
+        shedding_ = false; // every gauge fell below its resume level
+    }
+    if (const auto r = over(1.0)) {
+        shedding_ = true;
+        return r;
+    }
+    return std::nullopt;
 }
 
 void QueueNode::on_peer_dead(const taut::Endpoint& peer) {
@@ -217,9 +337,19 @@ void QueueNode::submit(SubmitParams p, SubmitCb cb) {
         cb(qstatus::kNoQuorum, JobId{});
         return;
     }
+    // Gateway bound: forwarded submits hold an RPC slot and a parked HTTP request here. The
+    // gateway cannot tell a retry from new work, so this refusal is the one place a retry
+    // can be refused; it still allocates nothing and the client retries with the same key.
+    if (cfg_.admission.enabled && gateway_forwards_ >= cfg_.admission.max_gateway_forwards) {
+        counters_.refused[static_cast<int>(RefuseReason::Gateway)]++;
+        cb(qstatus::kOverloaded, JobId{});
+        return;
+    }
+    gateway_forwards_++;
     const auto frame = encode_params(p);
     rpc_.call(owner, Method::FwdSubmit, frame, cfg_.rpc_timeout,
-              [cb = std::move(cb)](std::uint32_t st, taut::ByteSpan body) mutable {
+              [this, cb = std::move(cb)](std::uint32_t st, taut::ByteSpan body) mutable {
+                  gateway_forwards_--;
                   if (st < 0xFFFF0000) {
                       JobId id{};
                       if (body.size() >= kJobIdSize) {
@@ -282,7 +412,20 @@ void QueueNode::query_status_target(const JobId& id, std::vector<taut::Endpoint>
 void QueueNode::owner_submit(SubmitParams p, SubmitCb cb) {
     if (Job* existing = store_.find_by_idem(p.idem_key)) {
         counters_.duplicates++;
+        if (unconfirmed_.count(existing->id) != 0) {
+            // Locally durable but no replica has acknowledged it (e.g. a crash after the
+            // local barrier, or any owned job right after a restart): answering "duplicate"
+            // now would be a W=1 success. Push the copy and answer on the first replica ack.
+            confirm_then_answer(existing->id, std::move(cb));
+            return;
+        }
         cb(qstatus::kDuplicate, existing->id);
+        return;
+    }
+    // A retry racing the original's durability barrier joins it: same id or same failure.
+    if (auto pit = pending_idem_.find(p.idem_key); pit != pending_idem_.end()) {
+        counters_.duplicates++;
+        pit->second.waiters.push_back(std::move(cb));
         return;
     }
     // Retried keys remain readable during drain; only new admission must stop.
@@ -291,6 +434,18 @@ void QueueNode::owner_submit(SubmitParams p, SubmitCb cb) {
         cb(qstatus::kNoQuorum, JobId{});
         return;
     }
+    if (store_.poisoned()) {
+        cb(qstatus::kNoQuorum, JobId{}); // nothing appended: a plain retryable refusal
+        return;
+    }
+    // Admission: refuse unique work before an id exists or a byte is logged.
+    const std::size_t bytes = p.body.size() + p.url.size() + p.idem_key.size();
+    if (const auto reason = admission_check(bytes)) {
+        counters_.refused[static_cast<int>(*reason)]++;
+        cb(qstatus::kOverloaded, JobId{});
+        return;
+    }
+    faults::crashpoint("submit.before_append");
     counters_.submits++;
     Job j;
     j.id.origin = ekey(cfg_.self);
@@ -320,13 +475,80 @@ void QueueNode::owner_submit(SubmitParams p, SubmitCb cb) {
     j.state = JobState::Ready;
     j.epoch = 1;
 
-    if (!store_.commit(Record{SubmitRec{j}})) {
-        cb(qstatus::kNoQuorum, JobId{}); // local durability failed; nothing promised
-        return;
+    const JobId id = j.id;
+    const std::string key = j.idem_key;
+    inflight_submits_++;
+    inflight_submit_bytes_ += bytes;
+    // Every exit from here answers exactly once through `finish`, which returns the
+    // admission budget; success is only ever reported after local barrier + replica ack.
+    auto finish = [this, bytes, cb = std::move(cb)](std::uint32_t st, const JobId& jid) {
+        inflight_submits_--;
+        inflight_submit_bytes_ -= bytes;
+        if (st == qstatus::kCreated) {
+            faults::crashpoint("submit.after_quorum_before_response");
+        }
+        cb(st, jid);
+    };
+    pending_idem_[key] = PendingIdem{id, {}};
+    const bool was_poisoned = store_.poisoned();
+    const bool queued =
+        commit_local(id, Record{SubmitRec{std::move(j)}}, [this, id, key, finish](bool ok) {
+            std::vector<SubmitCb> waiters;
+            if (auto pit = pending_idem_.find(key); pit != pending_idem_.end()) {
+                waiters = std::move(pit->second.waiters);
+                pending_idem_.erase(pit);
+            }
+            if (!ok) {
+                // The barrier failed after the append: the record may or may not survive
+                // restart. "Not accepted" would be a lie; report UNKNOWN.
+                counters_.submit_unknown++;
+                finish(qstatus::kUnknown, id);
+                for (auto& w : waiters) {
+                    w(qstatus::kUnknown, id);
+                }
+                return;
+            }
+            faults::crashpoint("submit.after_flush_before_quorum");
+            // Queued now, but lease() skips it until a replica acknowledges the SUBMIT.
+            ready_.push_back(id);
+            submit_time_[id] = rpc_.now();
+            const Job* nj = store_.find(id);
+            bool has_peer = false;
+            if (nj != nullptr) {
+                for_each_peer_slot(*nj, cfg_.self,
+                                   [&](std::size_t, const taut::Endpoint&) { has_peer = true; });
+            }
+            if (has_peer) {
+                unconfirmed_.insert(id);
+            }
+            // Racing retries learn the original's quorum outcome, not just its local one.
+            start_replication(id, /*track_quorum=*/true,
+                              [finish, waiters](std::uint32_t st, const JobId& jid) {
+                                  finish(st, jid);
+                                  for (const auto& w : waiters) {
+                                      if (st == qstatus::kCreated) {
+                                          w(qstatus::kDuplicate, jid);
+                                      } else {
+                                          w(st, JobId{});
+                                      }
+                                  }
+                              });
+        });
+    if (!queued) {
+        pending_idem_.erase(key);
+        counters_.submits--;
+        if (!was_poisoned && store_.poisoned()) {
+            // This append itself hit the write error: bytes may be on disk.
+            counters_.submit_unknown++;
+            finish(qstatus::kUnknown, id);
+        } else if (store_.poisoned()) {
+            finish(qstatus::kNoQuorum, JobId{});
+        } else {
+            // WAL pending bound (only reachable with admission off): nothing appended.
+            counters_.refused[static_cast<int>(RefuseReason::Wal)]++;
+            finish(qstatus::kOverloaded, JobId{});
+        }
     }
-    ready_.push_back(j.id); // leasable immediately; workers see it before repair finishes
-    submit_time_[j.id] = rpc_.now();
-    start_replication(j.id, /*track_quorum=*/true, std::move(cb));
 }
 
 void QueueNode::start_replication(const JobId& id, bool track_quorum, SubmitCb cb) {
@@ -355,14 +577,15 @@ void QueueNode::send_replicate(const JobId& id, std::size_t slot) {
     if (j == nullptr) {
         return;
     }
+    const Job sent = *j;
     std::vector<std::byte> body;
-    put_job(body, *j);
+    put_job(body, sent);
     rpc_.call(j->replicas[slot], Method::Replicate, body, cfg_.rpc_timeout,
-              [this, id, slot](std::uint32_t st, taut::ByteSpan) {
+              [this, id, slot, sent](std::uint32_t st, taut::ByteSpan) {
                   auto pit = pending_submits_.find(id);
                   const bool ok = st == qstatus::kCreated || st == qstatus::kDuplicate;
                   if (ok) {
-                      mark_replica_ok(id, slot);
+                      mark_replica_ok(id, slot, sent);
                   } else if (st == qstatus::kStaleEpoch) {
                       resync_job(id); // someone out there has a newer epoch than us
                   }
@@ -383,6 +606,48 @@ void QueueNode::send_replicate(const JobId& id, std::size_t slot) {
                       submit_result(id, qstatus::kNoQuorum);
                   }
               });
+}
+
+void QueueNode::confirm_then_answer(const JobId& id, SubmitCb cb) {
+    const Job* j = store_.find(id);
+    if (j == nullptr) {
+        cb(qstatus::kNoQuorum, JobId{});
+        return;
+    }
+    const Job sent = *j;
+    struct Wait {
+        SubmitCb cb;
+        int outstanding = 0;
+        bool fired = false;
+    };
+    auto w = std::make_shared<Wait>();
+    w->cb = std::move(cb);
+    std::vector<std::byte> body;
+    put_job(body, sent);
+    for_each_peer_slot(sent, cfg_.self, [&](std::size_t slot, const taut::Endpoint& m) {
+        w->outstanding++;
+        rpc_.call(m, Method::Replicate, body, cfg_.rpc_timeout,
+                  [this, id, slot, w, sent](std::uint32_t st, taut::ByteSpan) {
+                      w->outstanding--;
+                      const bool ok = st == qstatus::kCreated || st == qstatus::kDuplicate;
+                      if (ok) {
+                          mark_replica_ok(id, slot, sent);
+                      }
+                      if (w->fired) {
+                          return;
+                      }
+                      if (ok) {
+                          w->fired = true;
+                          w->cb(qstatus::kDuplicate, id);
+                      } else if (w->outstanding == 0) {
+                          w->fired = true;
+                          w->cb(qstatus::kNoQuorum, JobId{});
+                      }
+                  });
+    });
+    if (w->outstanding == 0) {
+        w->cb(qstatus::kDuplicate, id); // no peer slots: tiny-cluster W=1, disclosed
+    }
 }
 
 void QueueNode::submit_result(const JobId& id, std::uint32_t st) {
@@ -414,15 +679,27 @@ void QueueNode::handle_replicate(const RpcNode::ReqCtx& ctx, taut::ByteSpan body
         rpc_.respond(ctx, qstatus::kInvalid, {});
         return;
     }
-    if (const Job* known = store_.find(j.id); known != nullptr && j.epoch < known->epoch) {
-        rpc_.respond(ctx, qstatus::kStaleEpoch, {});
-        return;
-    }
-    if (!store_.commit(Record{ReplicateRec{std::move(j)}})) {
+    const JobId id = j.id;
+    const bool parked = with_job(id, [this, ctx, j = std::move(j)]() mutable {
+        if (const Job* known = store_.find(j.id); known != nullptr && j.epoch < known->epoch) {
+            rpc_.respond(ctx, qstatus::kStaleEpoch, {});
+            return;
+        }
+        const JobId jid = j.id;
+        // The replica's ack is issued only from the barrier waiter: "replicated" means
+        // "on this replica's stable storage", never "in its page cache".
+        if (!commit_local(jid, Record{ReplicateRec{std::move(j)}}, [this, ctx](bool ok) {
+                if (ok) {
+                    faults::crashpoint("replica.after_flush_before_reply");
+                }
+                rpc_.respond(ctx, ok ? qstatus::kCreated : qstatus::kNoQuorum, {});
+            })) {
+            rpc_.respond(ctx, qstatus::kNoQuorum, {});
+        }
+    });
+    if (!parked) {
         rpc_.respond(ctx, qstatus::kNoQuorum, {});
-        return;
     }
-    rpc_.respond(ctx, qstatus::kCreated, {});
 }
 
 // ---- lease / ack / expiry (M5, DESIGN-protocol §3) -------------------------------------------
@@ -476,13 +753,17 @@ bool QueueNode::replicas_reachable(const Job& j) const {
     return reachable || !has_slot; // no peers configured (tiny cluster): W=1, disclosed
 }
 
-void QueueNode::mark_replica_ok(const JobId& id, std::size_t slot) {
+void QueueNode::mark_replica_ok(const JobId& id, std::size_t slot, const Job& confirmed) {
+    unconfirmed_.erase(id); // any acknowledged full copy carries the SUBMIT
+    const Job* j = store_.find(id);
+    if (j == nullptr || !same_job_version(*j, confirmed)) {
+        return; // this reply confirms an older state; repair the current state separately
+    }
     auto rit = repair_.find(id);
     if (rit == repair_.end()) {
         return;
     }
     rit->second |= static_cast<std::uint8_t>(1u << slot);
-    const Job* j = store_.find(id);
     std::uint8_t want = 0;
     if (j != nullptr) {
         for_each_peer_slot(*j, cfg_.self, [&](std::size_t s, const taut::Endpoint&) {
@@ -494,34 +775,61 @@ void QueueNode::mark_replica_ok(const JobId& id, std::size_t slot) {
     }
 }
 
-void QueueNode::quorum_commit(const JobId& id, const Record& rec, std::function<void(bool)> done) {
-    if (!store_.commit(rec)) {
+void QueueNode::quorum_commit(const JobId& id, const Record& rec, std::function<void(bool)> done,
+                              std::function<void(bool)> on_local) {
+    // Local barrier first, replicas second: a replica must never hold a transition the owner
+    // could lose (an owner that crashes before its own fsync would otherwise leave peers with
+    // a record it does not know about). Replica acks are themselves post-barrier.
+    auto shared_done = std::make_shared<std::function<void(bool)>>(std::move(done));
+    if (!commit_local(id, rec, [this, id, rec, shared_done, on_local](bool ok) {
+            if (on_local) {
+                on_local(ok);
+            }
+            if (!ok) {
+                (*shared_done)(false);
+                return;
+            }
+            replicate_record(id, rec, std::move(*shared_done));
+        })) {
+        if (on_local) {
+            on_local(false);
+        }
+        (*shared_done)(false);
+    }
+}
+
+void QueueNode::replicate_record(const JobId& id, const Record& rec,
+                                 std::function<void(bool)> done) {
+    const Job* j = store_.find(id);
+    if (j == nullptr) {
         done(false);
         return;
     }
-    const Job* j = store_.find(id);
+    const Job sent = *j;
     repair_[id] = 0; // this transition is unconfirmed on every replica until acked
     struct QState {
         std::function<void(bool)> done;
+        Job sent;
         int needed = 1;
         int outstanding = 0;
         bool fired = false;
     };
     auto st = std::make_shared<QState>();
     st->done = std::move(done);
-    for_each_peer_slot(*j, cfg_.self,
+    st->sent = sent;
+    for_each_peer_slot(sent, cfg_.self,
                        [&](std::size_t, const taut::Endpoint&) { st->outstanding++; });
     if (st->outstanding == 0) {
         st->done(true);
         return;
     }
     const auto body = encode_record(rec, 0); // replicas re-stamp their own lsn on commit
-    for_each_peer_slot(*j, cfg_.self, [&](std::size_t s, const taut::Endpoint& member) {
+    for_each_peer_slot(sent, cfg_.self, [&](std::size_t s, const taut::Endpoint& member) {
         rpc_.call(member, Method::Apply, body, cfg_.rpc_timeout,
                   [this, id, s, st](std::uint32_t code, taut::ByteSpan) {
                       st->outstanding--;
                       if (code == qstatus::kCreated) {
-                          mark_replica_ok(id, s);
+                          mark_replica_ok(id, s, st->sent);
                           st->needed--;
                       } else if (code == qstatus::kStaleEpoch) {
                           resync_job(id); // our authority is gone; adopt the winner
@@ -548,31 +856,40 @@ void QueueNode::handle_apply(const RpcNode::ReqCtx& ctx, taut::ByteSpan body) {
         rpc_.respond(ctx, qstatus::kInvalid, {});
         return;
     }
-    Job* j = store_.find(m.id);
-    if (j == nullptr) {
-        // Repair lag: we never got the job copy. The owner's quorum uses the other replica;
-        // the full-copy repair loop fills us in.
-        rpc_.respond(ctx, qstatus::kUnknownJob, {});
-        return;
-    }
-    // Epoch fencing — THE line that stops a partitioned stale owner: its records carry an
-    // epoch below what a majority already adopted, so it cannot commit a lease anywhere.
-    if (m.epoch < j->epoch) {
-        counters_.fenced_stale++;
-        rpc_.respond(ctx, qstatus::kStaleEpoch, {});
-        return;
-    }
-    // Equal-epoch records must come from the owner we believe in; a legitimate successor
-    // always CLAIMs first (which is how our owner/epoch view moves forward).
-    if (!(ctx.from == j->owner) && !std::holds_alternative<TakeoverRec>(*rec)) {
-        rpc_.respond(ctx, qstatus::kNotOwner, {});
-        return;
-    }
-    if (!store_.commit(*rec)) {
+    const bool parked = with_job(m.id, [this, ctx, m, r = *rec]() {
+        Job* j = store_.find(m.id);
+        if (j == nullptr) {
+            // Repair lag: we never got the job copy. The owner's quorum uses the other
+            // replica; the full-copy repair loop fills us in.
+            rpc_.respond(ctx, qstatus::kUnknownJob, {});
+            return;
+        }
+        // Epoch fencing — THE line that stops a partitioned stale owner: its records carry
+        // an epoch below what a majority already adopted, so it cannot commit a lease
+        // anywhere. Validated against committed state only (with_job).
+        if (m.epoch < j->epoch) {
+            counters_.fenced_stale++;
+            rpc_.respond(ctx, qstatus::kStaleEpoch, {});
+            return;
+        }
+        // Equal-epoch records must come from the owner we believe in; a legitimate
+        // successor always CLAIMs first (which is how our owner/epoch view moves forward).
+        if (!(ctx.from == j->owner) && !std::holds_alternative<TakeoverRec>(r)) {
+            rpc_.respond(ctx, qstatus::kNotOwner, {});
+            return;
+        }
+        if (!commit_local(m.id, r, [this, ctx](bool ok) {
+                if (ok) {
+                    faults::crashpoint("replica.after_flush_before_reply");
+                }
+                rpc_.respond(ctx, ok ? qstatus::kCreated : qstatus::kNoQuorum, {});
+            })) {
+            rpc_.respond(ctx, qstatus::kNoQuorum, {});
+        }
+    });
+    if (!parked) {
         rpc_.respond(ctx, qstatus::kNoQuorum, {});
-        return;
     }
-    rpc_.respond(ctx, qstatus::kCreated, {});
 }
 
 void QueueNode::lease(std::uint64_t worker_id, LeaseCb cb) {
@@ -586,9 +903,19 @@ void QueueNode::lease(std::uint64_t worker_id, LeaseCb cb) {
     for (std::size_t i = 0; i < scan && pick == nullptr; ++i) {
         const JobId id = ready_.front();
         ready_.pop_front();
+        if (job_busy(id)) {
+            // A transition (e.g. the EXPIRE that requeued it) is behind the barrier: judge
+            // the entry on committed state later, never drop it on the pre-transition view.
+            ready_.push_back(id);
+            continue;
+        }
         Job* j = store_.find(id);
         if (j == nullptr || j->state != JobState::Ready || !owned_by_me(*j)) {
             continue; // stale queue entry; drop it
+        }
+        if (unconfirmed_.count(id) != 0) {
+            ready_.push_back(id); // SUBMIT not yet on a replica: granting would be W=1
+            continue;
         }
         if (auto nb = not_before_.find(id); nb != not_before_.end() && now < nb->second) {
             ready_.push_back(id); // backing off; revisit later
@@ -628,7 +955,9 @@ void QueueNode::lease(std::uint64_t worker_id, LeaseCb cb) {
             // The lease is locally committed but unconfirmed — expire it right back to
             // Ready (same fence values). The consumed lease_seq is the conservative price;
             // backoff + the membership gate keep this from recurring fast.
-            store_.commit(Record{ExpireRec{id, j->epoch, j->lease_seq}});
+            if (j->state == JobState::Leased) {
+                commit_local(id, Record{ExpireRec{id, j->epoch, j->lease_seq}}, [](bool) {});
+            }
             requeue_ready(id, rpc_.now() + nack_backoff(j->attempts));
             cb(qstatus::kNoQuorum, {});
             return;
@@ -656,6 +985,9 @@ void QueueNode::expiry_tick(TimePoint now) {
         }
     }
     for (const auto& id : due) {
+        if (job_busy(id)) {
+            continue; // keep the deadline; re-evaluate once the pending transition lands
+        }
         lease_deadline_.erase(id);
         Job* j = store_.find(id);
         if (j == nullptr || j->state != JobState::Leased || !owned_by_me(*j)) {
@@ -731,6 +1063,16 @@ void QueueNode::handle_fwd_status(const RpcNode::ReqCtx& ctx, taut::ByteSpan bod
 
 void QueueNode::owner_ack(const JobId& id, std::uint32_t epoch, std::uint32_t lease_seq,
                           bool success, AckCb cb) {
+    // Token validation must see committed state: if a LEASE/DONE for this job is behind the
+    // barrier, wait for it rather than validate against the pre-transition view.
+    if (job_busy(id)) {
+        if (!with_job(id, [this, id, epoch, lease_seq, success, cb]() {
+                owner_ack(id, epoch, lease_seq, success, cb);
+            })) {
+            cb(qstatus::kNoQuorum);
+        }
+        return;
+    }
     Job* j = store_.find(id);
     if (j == nullptr) {
         cb(qstatus::kUnknownJob);
@@ -755,9 +1097,13 @@ void QueueNode::owner_ack(const JobId& id, std::uint32_t epoch, std::uint32_t le
         // Delivery failed (e.g. destination 5xx): back to Ready with exponential backoff.
         counters_.completions_failed++;
         lease_deadline_.erase(id);
-        quorum_commit(id, Record{ExpireRec{id, j->epoch, j->lease_seq}}, [](bool) {});
-        requeue_ready(id, rpc_.now() + nack_backoff(j->attempts));
-        cb(qstatus::kCreated);
+        const auto backoff = nack_backoff(j->attempts);
+        requeue_ready(id, rpc_.now() + backoff);
+        // The nack is answered once the EXPIRE is locally durable; replicas converge
+        // asynchronously (EXPIRE is not W=2-blocking, §M5 note).
+        quorum_commit(
+            id, Record{ExpireRec{id, j->epoch, j->lease_seq}}, [](bool) {},
+            [cb](bool ok) { cb(ok ? qstatus::kCreated : qstatus::kNoQuorum); });
         return;
     }
     // Amnesty (§3): the lease expired (or the owner changed) but nobody re-leased the job —
@@ -780,6 +1126,7 @@ void QueueNode::owner_ack(const JobId& id, std::uint32_t epoch, std::uint32_t le
         }
         if (ok) {
             counters_.completions_ok++;
+            faults::crashpoint("done.after_quorum_before_response");
         }
         cb(ok ? qstatus::kCreated : qstatus::kNoQuorum);
     });
@@ -829,6 +1176,10 @@ void QueueNode::start_takeover(const JobId& id) {
     if (draining_ || claims_.count(id) != 0) {
         return; // a draining node sheds work, never acquires it
     }
+    if (job_busy(id)) {
+        with_job(id, [this, id]() { start_takeover(id); });
+        return;
+    }
     Job* j = store_.find(id);
     if (j == nullptr || owned_by_me(*j) || j->state == JobState::Done ||
         j->state == JobState::DeadLetter) {
@@ -838,8 +1189,20 @@ void QueueNode::start_takeover(const JobId& id) {
     // harm: acting on it means committing leases/completions, and those are quorum-fenced —
     // a rival that reached majority first makes our epoch stale everywhere it matters.
     const std::uint32_t proposed = j->epoch + 1;
-    if (!store_.commit(Record{TakeoverRec{id, proposed, cfg_.self}})) {
+    commit_local(id, Record{TakeoverRec{id, proposed, cfg_.self}}, [this, id, proposed](bool ok) {
+        if (ok) {
+            begin_claims(id, proposed);
+        }
+    });
+}
+
+void QueueNode::begin_claims(const JobId& id, std::uint32_t proposed) {
+    if (draining_ || claims_.count(id) != 0) {
         return;
+    }
+    Job* j = store_.find(id);
+    if (j == nullptr || !owned_by_me(*j) || j->epoch != proposed) {
+        return; // superseded while the TAKEOVER record was behind the barrier
     }
     int set_size = 0;
     for (const auto& r : j->replicas) {
@@ -942,6 +1305,15 @@ void QueueNode::handle_claim(const RpcNode::ReqCtx& ctx, taut::ByteSpan body) {
         rpc_.respond(ctx, qstatus::kInvalid, {}); // claims are strictly first-person
         return;
     }
+    if (!with_job(id, [this, ctx, id, proposed, new_owner]() {
+            handle_claim_committed(ctx, id, proposed, new_owner);
+        })) {
+        rpc_.respond(ctx, qstatus::kNoQuorum, {});
+    }
+}
+
+void QueueNode::handle_claim_committed(const RpcNode::ReqCtx& ctx, const JobId& id,
+                                       std::uint32_t proposed, const taut::Endpoint& new_owner) {
     Job* j = store_.find(id);
     if (j == nullptr) {
         rpc_.respond(ctx, qstatus::kUnknownJob, {});
@@ -969,12 +1341,19 @@ void QueueNode::handle_claim(const RpcNode::ReqCtx& ctx, taut::ByteSpan body) {
         rpc_.respond(ctx, qstatus::kCreated, resp); // idempotent re-claim
         return;
     }
-    if (!store_.commit(Record{TakeoverRec{id, proposed, new_owner}})) {
+    // The grant is answered only after our TAKEOVER copy is durable: a granted claim is a
+    // promise to fence the old epoch across our own restart.
+    if (!commit_local(id, Record{TakeoverRec{id, proposed, new_owner}},
+                      [this, ctx, id, resp](bool ok) {
+                          if (!ok) {
+                              rpc_.respond(ctx, qstatus::kNoQuorum, {});
+                              return;
+                          }
+                          after_ownership_change(id); // if WE were the owner, stand down
+                          rpc_.respond(ctx, qstatus::kCreated, resp);
+                      })) {
         rpc_.respond(ctx, qstatus::kNoQuorum, {});
-        return;
     }
-    after_ownership_change(id); // if WE were the owner (drain, false death), stand down
-    rpc_.respond(ctx, qstatus::kCreated, resp);
 }
 
 void QueueNode::finalize_takeover(const JobId& id) {
@@ -984,25 +1363,52 @@ void QueueNode::finalize_takeover(const JobId& id) {
     }
     const ClaimState st = it->second;
     claims_.erase(it);
+    if (!with_job(id, [this, id, st]() { finalize_takeover_committed(id, st); })) {
+        claims_[id] = st; // claim_tick retries
+    }
+}
+
+void QueueNode::finalize_takeover_committed(const JobId& id, const ClaimState& st) {
     Job* j = store_.find(id);
     if (j == nullptr || !owned_by_me(*j)) {
         return;
     }
     counters_.takeovers++;
-    const auto now = rpc_.now();
     const auto merged = static_cast<JobState>(st.best_state);
+    std::optional<Record> rec;
+    bool arm_lease = false;
     if (merged == JobState::Done && j->state != JobState::Done) {
-        store_.commit(Record{DoneRec{id, j->epoch, st.best_seq}});
+        rec = Record{DoneRec{id, j->epoch, st.best_seq}};
     } else if (merged == JobState::DeadLetter && j->state != JobState::Done &&
                j->state != JobState::DeadLetter) {
-        store_.commit(Record{DeadLetterRec{id, j->epoch}});
+        rec = Record{DeadLetterRec{id, j->epoch}};
     } else if (merged == JobState::Leased || st.best_seq > j->lease_seq) {
         // An inherited lease — possibly one this node never saw. Record it at our epoch and
         // give the (unknown) worker one full visibility window before any re-grant.
         if (j->state != JobState::Leased || j->lease_seq < st.best_seq) {
             const std::uint32_t seq = st.best_seq > j->lease_seq ? st.best_seq : j->lease_seq;
-            store_.commit(Record{LeaseRec{id, j->epoch, seq, 0}});
+            rec = Record{LeaseRec{id, j->epoch, seq, 0}};
         }
+        arm_lease = true;
+    }
+    if (rec) {
+        commit_local(id, *rec, [this, id, arm_lease](bool ok) {
+            if (ok) {
+                after_takeover_settled(id, arm_lease);
+            }
+        });
+        return;
+    }
+    after_takeover_settled(id, arm_lease);
+}
+
+void QueueNode::after_takeover_settled(const JobId& id, bool arm_lease) {
+    Job* j = store_.find(id);
+    if (j == nullptr || !owned_by_me(*j)) {
+        return;
+    }
+    const auto now = rpc_.now();
+    if (arm_lease) {
         lease_deadline_[id] = now + std::chrono::milliseconds(j->visibility_ms);
     }
     if (j->state == JobState::Ready) {
@@ -1071,12 +1477,17 @@ void QueueNode::resync_job(const JobId& id) {
                       if (get_job(resp, 0, remote) == 0 || !(remote.id == id)) {
                           return;
                       }
-                      Job* local = store_.find(id);
-                      if (local == nullptr || !job_advances(*local, remote)) {
-                          return;
-                      }
-                      store_.commit(Record{ReplicateRec{remote}});
-                      after_ownership_change(id);
+                      with_job(id, [this, id, remote]() {
+                          Job* local = store_.find(id);
+                          if (local == nullptr || !job_advances(*local, remote)) {
+                              return;
+                          }
+                          commit_local(id, Record{ReplicateRec{remote}}, [this, id](bool ok) {
+                              if (ok) {
+                                  after_ownership_change(id);
+                              }
+                          });
+                      });
                   });
     });
     if (sent > 0) {
@@ -1135,6 +1546,9 @@ void QueueNode::drain_tick(TimePoint now) {
             continue;
         }
         remaining = true;
+        if (job_busy(id)) {
+            continue; // let the pending transition land before handing the job off
+        }
         // Ask the first alive fellow member to claim the job through the ordinary takeover
         // path — the drain handoff IS a takeover, just invited instead of death-triggered.
         for (const auto& r : j.replicas) {
@@ -1147,6 +1561,9 @@ void QueueNode::drain_tick(TimePoint now) {
             }
         }
     }
+    // Drain completes only once nothing is behind the barrier: pending submits are either
+    // committed (and then handed off like any job) or answered UNKNOWN by a failed flush.
+    remaining = remaining || !pending_idem_.empty() || store_.pending_records() != 0;
     if (!remaining && drain_cb_) {
         DrainCb cb = std::move(drain_cb_);
         drain_cb_ = nullptr;

@@ -2,10 +2,12 @@
 
 #include <chrono>
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "ring.h"
@@ -13,6 +15,8 @@
 #include "store.h"
 
 namespace tautq {
+
+class QueueNodeTestAccess;
 
 // Application-level statuses (RPC status field / HTTP mapping). Transport failures use the
 // status:: space from rpc.h.
@@ -26,7 +30,31 @@ inline constexpr std::uint32_t kUnknownJob = 5;
 inline constexpr std::uint32_t kNotOwner = 6;
 inline constexpr std::uint32_t kNotLeased = 7; // ack with no matching lease
 inline constexpr std::uint32_t kNoJob = 8;     // lease request: nothing ready
+// Known refusal: rejected by admission control BEFORE an id was allocated or anything was
+// appended. Definitely not accepted; retry later (HTTP 429 + Retry-After).
+inline constexpr std::uint32_t kOverloaded = 9;
+// Outcome unknown: the submit reached the log but its durability barrier failed (write or
+// fsync error). It may or may not survive; retry with the SAME idempotency key (HTTP 503).
+inline constexpr std::uint32_t kUnknown = 10;
 } // namespace qstatus
+
+// Bounded admission for UNIQUE submits (duplicates/idempotent retries are resolved first and
+// never refused here). Hard limits with hysteresis: once any limit is reached the node sheds
+// new unique work until every gauge falls to resume_ratio of its limit. Lease/ack/replication
+// /repair/takeover traffic is never subject to admission, and unique submits may only use
+// wal_submit_share of the WAL pending bound, reserving the rest for progress records.
+struct AdmissionConfig {
+    bool enabled = false;
+    std::size_t max_inflight_submits = 512;           // owner: admitted, not yet answered
+    std::size_t max_inflight_submit_bytes = 4u << 20; // owner: payload bytes of the above
+    std::size_t max_backlog_jobs = 20000;             // owner: owned Ready+Leased jobs
+    std::size_t max_gateway_forwards = 512;           // gateway: forwarded submits in flight
+    double resume_ratio = 0.8;
+    double wal_submit_share = 0.75;
+};
+
+enum class RefuseReason : std::uint8_t { Inflight = 0, Bytes, Backlog, Wal, Gateway, kCount };
+const char* refuse_reason_name(RefuseReason r);
 
 struct NodeConfig {
     taut::Endpoint self{};
@@ -35,6 +63,8 @@ struct NodeConfig {
     std::uint32_t default_max_attempts = 5;
     std::chrono::milliseconds rpc_timeout{1000};
     std::chrono::milliseconds repair_interval{2000};
+    GroupCommitConfig group_commit{};
+    AdmissionConfig admission{};
 };
 
 // The queue protocol brain (DESIGN-protocol §§2-4): ring-routed submit, W=2 replication
@@ -128,7 +158,11 @@ class QueueNode {
         std::uint64_t expirations = 0;
         std::uint64_t deadletters = 0;
         std::uint64_t takeovers = 0;
-        std::uint64_t fenced_stale = 0; // Apply records we rejected with kStaleEpoch
+        std::uint64_t fenced_stale = 0;   // Apply records we rejected with kStaleEpoch
+        std::uint64_t submit_unknown = 0; // barrier failed after append: outcome unknown
+        std::uint64_t refused[static_cast<int>(RefuseReason::kCount)] = {};
+        std::uint64_t deferred_ops = 0; // ops parked behind a job's pending transition
+        std::uint64_t busy_rejects = 0; // ops refused because a job's park queue was full
     };
     const Counters& counters() const {
         return counters_;
@@ -153,8 +187,29 @@ class QueueNode {
     std::size_t repair_backlog() const {
         return repair_.size();
     }
+    std::size_t inflight_submits() const {
+        return inflight_submits_;
+    }
+    std::size_t inflight_submit_bytes() const {
+        return inflight_submit_bytes_;
+    }
+    std::size_t gateway_forwards() const {
+        return gateway_forwards_;
+    }
+    bool shedding() const {
+        return shedding_;
+    }
+    std::size_t busy_jobs() const {
+        return busy_.size();
+    }
+    // When the loop must wake for a linger deadline (max() when none).
+    std::chrono::steady_clock::time_point next_wakeup() const {
+        return store_.next_deadline();
+    }
 
   private:
+    friend class QueueNodeTestAccess;
+
     using TimePoint = std::chrono::steady_clock::time_point;
 
     bool owned_by_me(const Job& j) const {
@@ -174,6 +229,7 @@ class QueueNode {
     void repair_tick(TimePoint now);
     void expiry_tick(TimePoint now);
     void submit_result(const JobId& id, std::uint32_t st);
+    void confirm_then_answer(const JobId& id, SubmitCb cb);
 
     void owner_ack(const JobId& id, std::uint32_t epoch, std::uint32_t lease_seq, bool success,
                    AckCb cb);
@@ -183,9 +239,12 @@ class QueueNode {
     // (leasable) with a majority of the set (counting self). An unconfirmed local takeover
     // is harmless: every grant/completion is quorum-fenced anyway.
     void start_takeover(const JobId& id);
+    void begin_claims(const JobId& id, std::uint32_t proposed);
     void finalize_takeover(const JobId& id);
     void claim_send(const JobId& id, const taut::Endpoint& to);
     void handle_claim(const RpcNode::ReqCtx& ctx, taut::ByteSpan body);
+    void handle_claim_committed(const RpcNode::ReqCtx& ctx, const JobId& id, std::uint32_t proposed,
+                                const taut::Endpoint& new_owner);
     void handle_drain_handoff(const RpcNode::ReqCtx& ctx, taut::ByteSpan body);
     void claim_tick(TimePoint now);
     // Reconcile one job against its replica set (triggered by kStaleEpoch anywhere, by a
@@ -198,8 +257,25 @@ class QueueNode {
     // Local fsync'd commit followed by Apply RPCs to both replicas; done(true) after one
     // replica ack (W=2 counting self). Also refreshes the repair mask pessimistically so
     // stragglers converge via the full-copy repair loop.
-    void quorum_commit(const JobId& id, const Record& rec, std::function<void(bool)> done);
-    void mark_replica_ok(const JobId& id, std::size_t slot);
+    void quorum_commit(const JobId& id, const Record& rec, std::function<void(bool)> done,
+                       std::function<void(bool)> on_local = {});
+    void replicate_record(const JobId& id, const Record& rec, std::function<void(bool)> done);
+
+    // Durability barrier plumbing. commit_local appends `rec` behind the group-commit
+    // barrier and marks the job busy; then(ok) runs after the batch's fsync (state already
+    // applied when ok) and only then is the job released. Returns false when nothing was
+    // appended (store poisoned or WAL pending bound reached); `then` is not called.
+    bool commit_local(const JobId& id, const Record& rec, std::function<void(bool)> then);
+    // Run fn now if the job has no pending transition, else park it behind that transition
+    // (validation must see committed state, never a speculative one). False = park queue
+    // full; fn is dropped and the caller answers with a retryable status.
+    bool with_job(const JobId& id, std::function<void()> fn);
+    bool job_busy(const JobId& id) const {
+        return busy_.count(id) != 0;
+    }
+    void release_job(const JobId& id);
+    std::optional<RefuseReason> admission_check(std::size_t bytes);
+    void mark_replica_ok(const JobId& id, std::size_t slot, const Job& confirmed);
     bool replicas_reachable(const Job& j) const;
     void requeue_ready(const JobId& id, TimePoint not_before);
     std::chrono::milliseconds nack_backoff(std::uint32_t attempt) const;
@@ -220,6 +296,23 @@ class QueueNode {
         int outstanding = 0; // replicate RPCs still in flight
     };
     std::unordered_map<JobId, PendingSubmit, JobIdHash> pending_submits_;
+    // Idempotency reservations for submits whose SUBMIT record is behind the barrier: a
+    // concurrent retry of the same key waits for the original instead of minting a twin.
+    struct PendingIdem {
+        JobId id{};
+        std::vector<SubmitCb> waiters;
+    };
+    std::unordered_map<std::string, PendingIdem> pending_idem_;
+    std::unordered_map<JobId, int, JobIdHash> busy_;
+    // Owned jobs whose SUBMIT no replica has yet acknowledged (pessimistically every owned
+    // job after a restart). Such a job is neither leasable nor reported to a retrying client
+    // as a duplicate success: both would be W=1 promises.
+    std::unordered_set<JobId, JobIdHash> unconfirmed_;
+    std::unordered_map<JobId, std::deque<std::function<void()>>, JobIdHash> parked_;
+    std::size_t inflight_submits_ = 0;
+    std::size_t inflight_submit_bytes_ = 0;
+    std::size_t gateway_forwards_ = 0;
+    bool shedding_ = false;
     // Owned jobs with replica slots not yet confirmed durable: bit i = replicas[i+1] OK.
     // Rebuilt pessimistically (all unconfirmed) after restart; re-replication is idempotent.
     std::unordered_map<JobId, std::uint8_t, JobIdHash> repair_;
@@ -247,6 +340,8 @@ class QueueNode {
         TimePoint next_retry{};
     };
     std::unordered_map<JobId, ClaimState, JobIdHash> claims_;
+    void finalize_takeover_committed(const JobId& id, const ClaimState& st);
+    void after_takeover_settled(const JobId& id, bool arm_lease);
     std::unordered_map<JobId, int, JobIdHash> resync_inflight_;
     bool draining_ = false;
     DrainCb drain_cb_;

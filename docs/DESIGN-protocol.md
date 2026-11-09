@@ -130,3 +130,49 @@ which is exactly the contract real webhook providers (Stripe/GitHub) publish.
   A draining gateway can still forward to a different healthy configured owner.
   TAKEOVER moves execution ownership only. Configured member changes require a
   coordinated migration; drain does not remove a member from the configured ring.
+
+- **(2026-11-04) Group-commit durability barrier.** "fsync at every commit point" is now
+  implemented as a node-local barrier instead of one fsync per record. `JobStore::commit_async`
+  encodes and appends a record and parks its waiter; nothing is applied. One `Wal::sync()`
+  covers the whole pending batch (flush-on-drain at the end of each event-loop pass, or
+  inline when `--max-batch` records or `max_batch_bytes` accumulate; `--max-batch 1` is the
+  old fsync-per-record behavior). Only after the sync succeeds are the records applied, in
+  LSN order, and their waiters released in the same order. Invariants:
+  1. The visible job table never contains a record that is not on stable storage, so every
+     RPC reply, replica ack and HTTP success is issued after its record's barrier.
+  2. `durable_lsn()` advances only on a successful data sync. Rotation data-syncs the
+     outgoing segment and fsyncs the directory for the new one before any record lands in
+     it, so a sync of the active descriptor certifies every segment the batch touched.
+  3. Owner order is local barrier, then replica RPC. A replica acks (`kCreated`) only from
+     its own barrier waiter. A submit/lease/done success therefore means "power-loss durable
+     on the owner and at least one pinned replica" (W=2 unchanged).
+  4. A write or sync failure poisons the store: every unapplied waiter is released with
+     failure, nothing more may commit, `/healthz` turns 503 and the node exits 70 for a
+     supervisor restart. Replay alone decides which unsynced records survived.
+  5. Per-job ordering: while a job has a transition behind the barrier it is "busy";
+     validations that read its state (replica apply/replicate, token checks in ack, claims,
+     takeover finalization, resync adoption, lease selection, expiry) are parked behind it
+     and run against committed state only. A retry of an idempotency key whose SUBMIT is
+     still behind the barrier joins the original (same id or same failure), never mints a
+     twin.
+  6. Compaction cuts at the watermark: pending records are synced and applied first, the
+     snapshot is built from applied state, and their waiters run only after the new
+     generation is installed (so follow-up appends land in it). A failure after the CURRENT
+     swap poisons the store.
+  7. Drain completes only when no submit is behind the barrier and nothing is pending.
+- **(2026-11-04) Known refusal vs unknown outcome.** Submits now return three failure kinds:
+  HTTP 429 `overloaded` (refused by admission before an id or log append: definitely not
+  accepted, retry later), HTTP 503 with `durability_unknown` (the local barrier failed after
+  the append: the job may exist; retry with the SAME key, which resolves to the original id if
+  it survived), and the existing retryable 503s (owner unavailable, draining, quorum not
+  reached). Earlier code reported a failed local fsync as "nothing promised", which was not
+  true once bytes had reached the page cache.
+- **(2026-11-04) Bounded admission.** Optional (`--admission`). Unique submits are refused
+  at the owner when in-flight submits, their payload bytes, the owned Ready+Leased backlog or
+  the WAL pending share would exceed a limit; once tripped, the node sheds until every gauge
+  is back under `resume_ratio` of its limit (hysteresis). Duplicate keys are resolved first
+  and never refused by admission. Gateways bound forwarded submits separately (they cannot
+  distinguish retries, so that refusal is still pre-allocation and retryable). Lease, ack,
+  replication, repair and takeover traffic is never subject to admission, and unique submits
+  may use only `wal_submit_share` of the WAL pending bound, reserving the rest for progress
+  records.

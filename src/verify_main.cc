@@ -10,6 +10,11 @@
 //                       with no such cause are protocol bugs.
 //
 //   tautq-verify --submits submits.csv --sink sink.log --logs dir0,dir1,...  [--allow-dlq]
+//                [--report-twins]
+//
+// --report-twins additionally prints keys_with_multiple_ids=N: idempotency keys that map to
+// more than one job id anywhere in the logs (zero is expected under stable ownership; the
+// count is reported, not hidden, and does not change the verdict).
 //
 // Exit 0 = PASS. Everything it checks is on disk — rerunnable after the fact.
 
@@ -33,7 +38,12 @@ struct JobFacts {
     Job merged; // most-advanced full copy seen
     bool have_copy = false;
     std::set<std::uint32_t> done_seqs; // distinct lease_seq across all DONE records
-    std::uint32_t max_lease_seq = 0;   // grants observed anywhere
+    // lease_seq -> log dirs holding a DONE with it. A completion COMMITS only on a majority
+    // of the pinned replica set (W=2, DESIGN §3); a DONE durable on a single log is an owner
+    // that crashed before its DONE quorum (its worker was never told success).
+    std::map<std::uint32_t, std::set<std::size_t>> done_logs;
+    std::map<std::uint32_t, std::set<std::size_t>> dead_letter_logs; // epoch -> durable copies
+    std::uint32_t max_lease_seq = 0;                                 // grants observed anywhere
     std::uint32_t max_epoch = 1;
 };
 
@@ -44,6 +54,7 @@ int main(int argc, char** argv) {
     std::string sink_path;
     std::string logs_csv;
     bool allow_dlq = false;
+    bool report_twins = false;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         const auto next = [&]() -> std::string { return i + 1 < argc ? argv[++i] : ""; };
@@ -55,6 +66,8 @@ int main(int argc, char** argv) {
             logs_csv = next();
         } else if (a == "--allow-dlq") {
             allow_dlq = true;
+        } else if (a == "--report-twins") {
+            report_twins = true;
         } else {
             std::fprintf(stderr, "unknown arg %s\n", a.c_str());
             return 2;
@@ -97,6 +110,15 @@ int main(int argc, char** argv) {
                 fold_job(s->job);
             } else if (const auto* r = std::get_if<ReplicateRec>(&*rec)) {
                 fold_job(r->job);
+                // Full-state repair is a durable copy too. A repair acknowledgement can
+                // complete the original quorum when an exact transition RPC was lost.
+                JobFacts& f = jobs[to_hex(r->job.id)];
+                if (r->job.state == JobState::Done) {
+                    f.done_seqs.insert(r->job.lease_seq);
+                    f.done_logs[r->job.lease_seq].insert(log_dirs);
+                } else if (r->job.state == JobState::DeadLetter) {
+                    f.dead_letter_logs[r->job.epoch].insert(log_dirs);
+                }
             } else if (const auto* l = std::get_if<LeaseRec>(&*rec)) {
                 JobFacts& f = jobs[to_hex(l->id)];
                 f.max_lease_seq = std::max(f.max_lease_seq, l->lease_seq);
@@ -104,6 +126,7 @@ int main(int argc, char** argv) {
             } else if (const auto* d = std::get_if<DoneRec>(&*rec)) {
                 JobFacts& f = jobs[to_hex(d->id)];
                 f.done_seqs.insert(d->lease_seq);
+                f.done_logs[d->lease_seq].insert(log_dirs);
                 Job done_marker = f.merged;
                 done_marker.id = d->id;
                 done_marker.state = JobState::Done;
@@ -117,6 +140,7 @@ int main(int argc, char** argv) {
                 f.max_epoch = std::max(f.max_epoch, t->new_epoch);
             } else if (const auto* dl = std::get_if<DeadLetterRec>(&*rec)) {
                 JobFacts& f = jobs[to_hex(dl->id)];
+                f.dead_letter_logs[dl->epoch].insert(log_dirs);
                 if (f.have_copy) {
                     Job m = f.merged;
                     m.state = JobState::DeadLetter;
@@ -185,27 +209,70 @@ int main(int argc, char** argv) {
     std::size_t unexplained_dupes = 0;
     std::size_t dlq = 0;
     std::size_t twins = 0;
+    std::size_t accepted_done = 0;
+    std::size_t accepted_pending = 0;
+    std::size_t accepted_dead_letter = 0;
+    std::size_t accepted_missing = 0;
+    std::size_t accepted_uncommitted_done = 0;
+    std::size_t accepted_uncommitted_dead_letter = 0;
 
     for (const auto& [key, acc] : accepted) {
         auto it = jobs.find(acc.id);
-        const bool done = it != jobs.end() && it->second.merged.state == JobState::Done;
-        const bool dead = it != jobs.end() && it->second.merged.state == JobState::DeadLetter;
+        if (it == jobs.end()) {
+            ++accepted_missing;
+            ++lost;
+            if (lost <= 10) {
+                std::fprintf(stderr, "LOST: key=%s id=%s state=missing\n", key.c_str(),
+                             acc.id.c_str());
+            }
+            continue;
+        }
+        const JobFacts& facts = it->second;
+        std::size_t committed_done = 0;
+        for (const auto& [seq, logs] : facts.done_logs) {
+            (void)seq;
+            committed_done += logs.size() >= 2 ? 1 : 0;
+        }
+        std::size_t committed_dead = 0;
+        for (const auto& [epoch, logs] : facts.dead_letter_logs) {
+            (void)epoch;
+            committed_dead += logs.size() >= 2 ? 1 : 0;
+        }
+        const bool done = committed_done > 0;
+        const bool dead = committed_dead > 0;
+        const bool has_uncommitted_done = !facts.done_seqs.empty() && committed_done == 0;
+        const bool has_uncommitted_dead = facts.merged.state == JobState::DeadLetter && !dead;
+        accepted_done += done ? 1 : 0;
+        accepted_dead_letter += dead ? 1 : 0;
+        accepted_uncommitted_done += has_uncommitted_done ? 1 : 0;
+        accepted_uncommitted_dead_letter += has_uncommitted_dead ? 1 : 0;
         if (dead) {
             ++dlq;
+        }
+        if (!done && !dead) {
+            ++accepted_pending;
         }
         if (!done && !(allow_dlq && dead)) {
             ++lost;
             if (lost <= 10) {
                 std::fprintf(stderr, "LOST: key=%s id=%s state=%d\n", key.c_str(), acc.id.c_str(),
-                             it == jobs.end() ? -1 : static_cast<int>(it->second.merged.state));
+                             static_cast<int>(facts.merged.state));
             }
         }
     }
+    std::size_t minority_done = 0;
     for (const auto& [id, f] : jobs) {
-        if (f.done_seqs.size() > 1) {
+        std::size_t committed = 0;
+        for (const auto& [seq, logs] : f.done_logs) {
+            committed += logs.size() >= 2 ? 1 : 0;
+        }
+        if (f.done_seqs.size() > 1 && committed <= 1) {
+            ++minority_done; // reported, not hidden: a re-run after an uncommitted DONE
+        }
+        if (committed > 1) {
             ++double_done;
-            std::fprintf(stderr, "DOUBLE-DONE: id=%s distinct completion seqs=%zu\n", id.c_str(),
-                         f.done_seqs.size());
+            std::fprintf(stderr, "DOUBLE-DONE: id=%s committed completion seqs=%zu\n", id.c_str(),
+                         committed);
         }
     }
     for (const auto& [key, count] : deliveries) {
@@ -252,9 +319,26 @@ int main(int argc, char** argv) {
         (void)k;
         dup_total += static_cast<std::size_t>(c > 1 ? c - 1 : 0);
     }
-    std::printf("verify: logs=%zu accepted=%zu delivered_keys=%zu duplicate_deliveries=%zu "
-                "(all attributable; fallback_twins=%zu) dead_letter=%zu jobs_seen=%zu -> %s\n",
-                log_dirs, accepted.size(), deliveries.size(), dup_total, twins, dlq, jobs.size(),
+    std::printf("verify: logs=%zu accepted=%zu accepted_done=%zu accepted_pending=%zu "
+                "accepted_dead_letter=%zu accepted_missing=%zu accepted_uncommitted_done=%zu "
+                "accepted_uncommitted_dead_letter=%zu delivered_keys=%zu duplicate_deliveries=%zu "
+                "(all attributable; fallback_twins=%zu) dead_letter=%zu jobs_seen=%zu "
+                "uncommitted_minority_done=%zu -> %s\n",
+                log_dirs, accepted.size(), accepted_done, accepted_pending, accepted_dead_letter,
+                accepted_missing, accepted_uncommitted_done, accepted_uncommitted_dead_letter,
+                deliveries.size(), dup_total, twins, dlq, jobs.size(), minority_done,
                 failures == 0 ? "PASS" : "FAIL");
+    if (report_twins) {
+        std::size_t multi = 0;
+        for (const auto& [key, ids] : key_ids) {
+            if (ids.size() > 1) {
+                ++multi;
+                if (multi <= 10) {
+                    std::fprintf(stderr, "TWIN: key=%s ids=%zu\n", key.c_str(), ids.size());
+                }
+            }
+        }
+        std::printf("keys_with_multiple_ids=%zu\n", multi);
+    }
     return failures == 0 ? 0 : 1;
 }

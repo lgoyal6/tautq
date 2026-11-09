@@ -36,6 +36,7 @@ add_library(tautq_core STATIC
     src/loop.cc
     src/http.cc
     src/http_client.cc
+    src/faults.cc
 )
 target_include_directories(tautq_core PUBLIC src)
 target_compile_features(tautq_core PUBLIC cxx_std_20)
@@ -52,6 +53,9 @@ target_link_libraries(tautq-sink PRIVATE tautq_core tautq_warnings)
 
 add_executable(tautq-verify src/verify_main.cc)
 target_link_libraries(tautq-verify PRIVATE tautq_core tautq_warnings)
+
+add_executable(tautq-bench src/bench_main.cc)
+target_link_libraries(tautq-bench PRIVATE tautq_warnings)
 
 add_executable(tautq-loadgen src/loadgen_main.cc)
 target_link_libraries(tautq-loadgen PRIVATE tautq_core tautq_warnings)
