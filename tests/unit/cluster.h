@@ -6,6 +6,7 @@
 // — the SimNet analog of what the M8 chaos suite does to real processes.
 
 #include <chrono>
+#include <cstdlib>
 #include <filesystem>
 #include <memory>
 #include <string>
@@ -32,6 +33,15 @@ struct DynamicMembership : StaticMembership {
     }
 };
 
+// TAUTQ_TEST_MAX_BATCH=1 reruns the whole suite on the unbatched (fsync-per-record) path;
+// the default exercises group commit. Both must pass.
+inline NodeConfig with_test_env(NodeConfig c) {
+    if (const char* v = std::getenv("TAUTQ_TEST_MAX_BATCH"); v != nullptr) {
+        c.group_commit.max_batch_records = std::strtoul(v, nullptr, 10);
+    }
+    return c;
+}
+
 template <typename MembershipImpl> struct BasicCluster {
     taut::SimNet net;
     std::vector<taut::Endpoint> eps;
@@ -52,7 +62,7 @@ template <typename MembershipImpl> struct BasicCluster {
         }
         for (int i = 0; i < n; ++i) {
             mems.push_back(std::make_unique<MembershipImpl>(eps));
-            NodeConfig cfg = proto;
+            NodeConfig cfg = with_test_env(proto);
             cfg.self = eps[static_cast<std::size_t>(i)];
             cfg.data_dir = base_dir + "/node" + std::to_string(i);
             nodes.push_back(std::make_unique<QueueNode>(net.endpoint(cfg.self), *mems.back(), cfg,
@@ -94,7 +104,7 @@ template <typename MembershipImpl> struct BasicCluster {
     // Fresh process over the same data dir: new boot id, replayed WAL.
     void restart(int i, NodeConfig proto = {}) {
         const auto idx = static_cast<std::size_t>(i);
-        NodeConfig cfg = proto;
+        NodeConfig cfg = with_test_env(proto);
         cfg.self = eps[idx];
         cfg.data_dir = base_dir + "/node" + std::to_string(i);
         nodes[idx] =

@@ -16,6 +16,7 @@
 #include "taut/crc32c.h"
 
 #include "bytes.h"
+#include "faults.h"
 
 namespace tautq {
 
@@ -157,6 +158,7 @@ bool Wal::open(const std::string& dir, const ReplayFn& fn) {
     std::sort(segs.begin(), segs.end()); // zero-padded start-lsn names sort correctly
 
     next_lsn_ = 0;
+    synced_sizes_.clear();
     for (std::size_t i = 0; i < segs.size(); ++i) {
         const std::string path = active_dir_ + "/" + segs[i];
         std::vector<std::byte> data;
@@ -172,6 +174,7 @@ bool Wal::open(const std::string& dir, const ReplayFn& fn) {
                 return false;
             }
         }
+        synced_sizes_[path] = clean; // replayed bytes are treated as the durable prefix
         if (i + 1 == segs.size()) {
             if (!open_active(path, /*create=*/false)) {
                 return false;
@@ -188,11 +191,13 @@ bool Wal::open(const std::string& dir, const ReplayFn& fn) {
             return false;
         }
         active_size_ = 0;
+        synced_sizes_[path] = 0;
         if (!sync_directory(active_dir_)) {
             failed_ = true;
             return false;
         }
     }
+    durable_lsn_ = next_lsn_;
     return true;
 }
 
@@ -202,7 +207,27 @@ bool Wal::open_active(const std::string& path, bool create) {
     }
     const int flags = O_WRONLY | O_APPEND | (create ? O_CREAT : 0);
     fd_ = ::open(path.c_str(), flags, 0644);
+    active_path_ = path;
     return fd_ >= 0;
+}
+
+faults::WalFault Wal::fault(const char* op) {
+    const auto global = faults::wal_fault(op);
+    if (global != faults::WalFault::None) {
+        return global;
+    }
+    return io_fault_hook_ ? io_fault_hook_(op) : faults::WalFault::None;
+}
+
+bool Wal::sync_fd(int fd) {
+    if (const auto delay = faults::sync_delay_us(); delay != 0) {
+        ::usleep(delay);
+    }
+    if (fault("sync") == faults::WalFault::FailSync) {
+        errno = EIO;
+        return false;
+    }
+    return sync_data_fd(fd);
 }
 
 bool Wal::sync_directory(const std::string& path) {
@@ -212,20 +237,29 @@ bool Wal::sync_directory(const std::string& path) {
 bool Wal::rotate() {
     if (failed_)
         return false;
-    if (!sync_data_fd(fd_)) {
+    // Flush-before-rotate: the outgoing segment holds every unsynced record (records never
+    // straddle segments), so syncing it here is what lets a later sync() of the NEW active
+    // descriptor certify the whole batch. Without it, records written to an older segment
+    // could be counted durable after only the newest file was synced.
+    if (!sync_fd(fd_)) {
         failed_ = true;
         return false;
     }
+    synced_sizes_[active_path_] = active_size_;
+    const std::uint64_t certified = next_lsn_;
     const std::string path = active_dir_ + "/" + segment_name(next_lsn_);
     if (!open_active(path, /*create=*/true)) {
         failed_ = true;
         return false;
     }
     active_size_ = 0;
+    synced_sizes_[path] = 0;
+    // The new file's directory entry must be durable before any record in it can be.
     if (!sync_directory(active_dir_)) {
         failed_ = true;
         return false;
     }
+    durable_lsn_ = certified;
     return true;
 }
 
@@ -256,7 +290,7 @@ bool Wal::compact(const std::vector<std::vector<std::byte>>& snapshot, const Com
     int out = -1;
     auto open_segment = [&](std::uint64_t start) {
         if (out >= 0) {
-            if (!sync_data_fd(out))
+            if (!sync_fd(out))
                 return false;
             ::close(out);
         }
@@ -280,12 +314,13 @@ bool Wal::compact(const std::vector<std::vector<std::byte>>& snapshot, const Com
         }
     }
     if (out >= 0) {
-        if (!sync_data_fd(out))
+        if (!sync_fd(out))
             ok = false;
         ::close(out);
     }
     if (!ok || !sync_directory(new_dir) || !sync_directory(dir_))
         return false;
+    faults::crashpoint("compact.snapshot_durable");
     if (hook && !hook(CompactStage::SnapshotDurable))
         return false;
 
@@ -305,7 +340,7 @@ bool Wal::compact(const std::vector<std::vector<std::byte>>& snapshot, const Com
         }
         written += static_cast<std::size_t>(n);
     }
-    if (!sync_data_fd(pfd)) {
+    if (!sync_fd(pfd)) {
         ::close(pfd);
         return false;
     }
@@ -341,16 +376,21 @@ bool Wal::compact(const std::vector<std::vector<std::byte>>& snapshot, const Com
         names.empty() ? active_dir_ + "/" + segment_name(0) : active_dir_ + "/" + names.back();
     if (!open_active(selected, /*create=*/names.empty()))
         return false;
-    struct stat st {};
+    struct stat st{};
     if (::fstat(fd_, &st) != 0)
         return false;
     active_size_ = static_cast<std::size_t>(st.st_size);
     next_lsn_ = lsn;
+    durable_lsn_ = lsn; // the snapshot generation was fully synced before installation
+    synced_sizes_.clear();
+    synced_sizes_[active_path_] = active_size_;
     failed_ = false;
+    faults::crashpoint("compact.installed");
     if (hook && !hook(CompactStage::Installed)) {
         failed_ = true;
         return false;
     }
+    faults::crashpoint("compact.before_old_log_deletion");
     if (hook && !hook(CompactStage::BeforeOldLogDeletion)) {
         failed_ = true;
         return false;
@@ -391,12 +431,33 @@ bool Wal::append(std::span<const std::byte> body, bool do_sync) {
             return false;
         }
     }
+    faults::crashpoint("wal.before_write");
 
     std::vector<std::byte> frame;
     frame.reserve(frame_size);
     put_u32(frame, static_cast<std::uint32_t>(body.size()));
     put_u32(frame, taut::crc32c(body));
     put_bytes(frame, body);
+
+    switch (fault("write")) {
+    case faults::WalFault::None:
+        break;
+    case faults::WalFault::ShortWrite: {
+        // Half a frame reaches the file, then the device reports full: a torn tail.
+        const auto half = static_cast<std::size_t>(frame.size() / 2);
+        if (::write(fd_, frame.data(), half) > 0) {
+            active_size_ += half;
+        }
+        errno = ENOSPC;
+        failed_ = true;
+        return false;
+    }
+    case faults::WalFault::FailWrite:
+    case faults::WalFault::FailSync:
+        errno = ENOSPC;
+        failed_ = true;
+        return false;
+    }
 
     std::size_t written = 0;
     while (written < frame.size()) {
@@ -418,10 +479,14 @@ bool Wal::append(std::span<const std::byte> body, bool do_sync) {
 bool Wal::sync() {
     if (fd_ < 0 || failed_)
         return false;
-    if (!sync_data_fd(fd_)) {
+    if (durable_lsn_ == next_lsn_)
+        return true; // nothing unsynced since the watermark
+    if (!sync_fd(fd_)) {
         failed_ = true;
         return false;
     }
+    synced_sizes_[active_path_] = active_size_;
+    durable_lsn_ = next_lsn_;
     return true;
 }
 

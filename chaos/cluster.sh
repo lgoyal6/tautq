@@ -11,12 +11,20 @@
 #   cluster.sh partition <i,j,..> <k,l,..>   drop all UDP between the two groups
 #   cluster.sh heal               remove every injected iptables rule
 #   cluster.sh loss <i> <prob>    drop UDP into node i with probability <prob>
+#
+# Optional environment (used by bench/overload): BIN may be absolute; NODE_BIN overrides the
+# node binary (e.g. an unchanged-baseline build); NODE_ARGS / WORKER_ARGS are appended to
+# every node / worker; NODE_ENV_<i> is an env assignment list for node i only (fault
+# injection, e.g. NODE_ENV_2="TAUTQ_CRASHPOINT=submit.after_flush_before_quorum:50");
+# VISIBILITY_MS (default 8000); NODES (default 5).
 set -u
 
 BIN="${BIN:-build/dev}"
+case "$BIN" in /*) BIN_ABS="$BIN" ;; *) BIN_ABS="$PWD/$BIN" ;; esac
+NODE_BIN="${NODE_BIN:-$BIN_ABS/tautq-node}"
 BR=tqbr0
 SUBNET=10.77.0
-NODES=5
+NODES="${NODES:-5}"
 
 node_ip() { echo "$SUBNET.$((10 + $1))"; }
 
@@ -37,7 +45,7 @@ up() {
         sudo ip netns exec "tq$i" ip link set "tqv$i" up
         sudo ip netns exec "tq$i" ip link set lo up
     done
-    "$BIN/tautq-sink" --port 8090 --out "$run/sink.log" 2>"$run/sink.err" &
+    "$BIN_ABS/tautq-sink" --port 8090 --out "$run/sink.log" >"$run/sink.out" 2>"$run/sink.err" &
     echo $! >"$run/sink.pid"
     for i in $(seq 0 $((NODES - 1))); do
         start_node "$i" "$run"
@@ -50,13 +58,17 @@ start_node() {
     for j in $(seq 0 $((NODES - 1))); do
         [ "$j" != "$i" ] && peers="${peers:+$peers,}$(node_ip "$j"):9000"
     done
-    sudo ip netns exec "tq$i" "$PWD/$BIN/tautq-node" \
+    local node_env
+    node_env=$(eval echo "\${NODE_ENV_$i:-}")
+    # shellcheck disable=SC2086
+    sudo ip netns exec "tq$i" env $node_env "$NODE_BIN" \
         --listen "$ip:9000" --http-port 8080 --data-dir "$run/node$i" \
-        --peers "$peers" --visibility-ms 8000 \
+        --peers "$peers" --visibility-ms "${VISIBILITY_MS:-8000}" ${NODE_ARGS:-} \
         >>"$run/node$i.out" 2>>"$run/node$i.err" &
     echo $! >"$run/node$i.pid"
-    sudo ip netns exec "tq$i" "$PWD/$BIN/tautq-worker" \
-        --node "http://$ip:8080" --worker-id "$((100 + i))" --poll-ms 50 \
+    # shellcheck disable=SC2086
+    sudo ip netns exec "tq$i" "$BIN_ABS/tautq-worker" \
+        --node "http://$ip:8080" --worker-id "$((100 + i))" --poll-ms 50 ${WORKER_ARGS:-} \
         2>>"$run/worker$i.err" &
     echo $! >"$run/worker$i.pid"
 }

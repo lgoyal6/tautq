@@ -21,6 +21,8 @@ add_executable(tautq_unit
     unit/lease_test.cc
     unit/failover_test.cc
     unit/http_test.cc
+    unit/group_commit_test.cc
+    unit/barrier_cluster_test.cc
 )
 target_link_libraries(tautq_unit PRIVATE tautq_core tautq_test_warnings GTest::gtest_main)
 

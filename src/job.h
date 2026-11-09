@@ -56,8 +56,8 @@ struct Job {
     JobState state = JobState::Ready;
     taut::Endpoint owner{};      // current owner (replicas[0] at birth; moves on Takeover)
     std::uint32_t epoch = 1;     // owner epoch e (fencing)
-    std::uint32_t lease_seq = 0; // increments per grant; (epoch, lease_seq) = lease token
-    std::uint32_t attempts = 0;  // == lease grants so far; DeadLetter at max_attempts
+    std::uint32_t lease_seq = 0; // active grant sequence, or the token that completed a Done job
+    std::uint32_t attempts = 0;  // lease grants observed; can exceed lease_seq after a late ack
 };
 
 // Serialized-job budget: a full job description must fit one REPLICATE RPC (kMaxRpcBody)

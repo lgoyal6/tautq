@@ -4,14 +4,18 @@
 // speaking the same three endpoints would behave identically.
 //
 //   tautq-worker --node http://127.0.0.1:8080 --worker-id 7 [--poll-ms 100]
-//                [--deliver-timeout-ms 5000]
+//                [--deliver-timeout-ms 5000] [--concurrency 1] [--quiet]
+//
+// --concurrency N runs N independent lease/deliver/ack loops (worker ids id*1000+i).
 
+#include <algorithm>
 #include <chrono>
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include "http_client.h"
 
@@ -29,6 +33,8 @@ int main(int argc, char** argv) {
     std::string worker_id = "1";
     int poll_ms = 100;
     int deliver_timeout_ms = 5000;
+    int concurrency = 1;
+    bool quiet = false;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         const auto next = [&]() -> std::string { return i + 1 < argc ? argv[++i] : ""; };
@@ -40,6 +46,10 @@ int main(int argc, char** argv) {
             poll_ms = std::atoi(next().c_str());
         } else if (a == "--deliver-timeout-ms") {
             deliver_timeout_ms = std::atoi(next().c_str());
+        } else if (a == "--concurrency") {
+            concurrency = std::max(1, std::atoi(next().c_str()));
+        } else if (a == "--quiet") {
+            quiet = true;
         } else {
             std::fprintf(stderr, "unknown arg: %s\n", a.c_str());
             return 2;
@@ -48,46 +58,65 @@ int main(int argc, char** argv) {
     std::signal(SIGINT, on_signal);
     std::signal(SIGTERM, on_signal);
     std::signal(SIGPIPE, SIG_IGN);
-    std::fprintf(stderr, "[worker %s] pulling from %s\n", worker_id.c_str(), node.c_str());
-
-    while (g_stop == 0) {
-        const auto lease =
-            tautq::http_fetch("POST", node + "/v1/lease?worker=" + worker_id, {}, "", 2000ms);
-        if (lease.code != 200) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(poll_ms));
-            continue;
-        }
-        const auto hdr = [&](const char* k) -> std::string {
-            auto it = lease.headers.find(k);
-            return it == lease.headers.end() ? "" : it->second;
-        };
-        const std::string id = hdr("x-tautq-id");
-        const std::string url = hdr("x-tautq-url");
-        const std::string key = hdr("x-tautq-key");
-        const std::string epoch = hdr("x-tautq-epoch");
-        const std::string seq = hdr("x-tautq-seq");
-        if (id.empty() || url.empty()) {
-            continue;
-        }
-
-        const auto delivery = tautq::http_fetch(
-            "POST", url, {{"Idempotency-Key", key}, {"X-Tautq-Attempt", hdr("x-tautq-attempt")}},
-            lease.body, std::chrono::milliseconds(deliver_timeout_ms));
-        const bool ok = delivery.code >= 200 && delivery.code < 300;
-        std::fprintf(stderr, "[worker %s] job=%s attempt=%s deliver=%d -> %s\n", worker_id.c_str(),
-                     id.c_str(), hdr("x-tautq-attempt").c_str(), delivery.code, ok ? "ok" : "fail");
-
-        // Report the outcome; 503 means the completion quorum is still forming — keep
-        // retrying, the ack path is idempotent.
-        const std::string ack_url = node + "/v1/ack?id=" + id + "&epoch=" + epoch + "&seq=" + seq +
-                                    "&result=" + (ok ? "ok" : "fail");
-        for (int attempt = 0; attempt < 50 && g_stop == 0; ++attempt) {
-            const auto ack = tautq::http_fetch("POST", ack_url, {}, "", 2000ms);
-            if (ack.code != 0 && ack.code != 503) {
-                break;
+    std::fprintf(stderr, "[worker %s] pulling from %s x%d\n", worker_id.c_str(), node.c_str(),
+                 concurrency);
+    const std::string base_id = worker_id;
+    const auto loop_fn = [&](int lane) {
+        const std::string worker_id = concurrency == 1
+                                          ? base_id
+                                          : std::to_string(std::stoull(base_id) * 1000 +
+                                                           static_cast<unsigned long long>(lane));
+        while (g_stop == 0) {
+            const auto lease =
+                tautq::http_fetch("POST", node + "/v1/lease?worker=" + worker_id, {}, "", 2000ms);
+            if (lease.code != 200) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(poll_ms));
+                continue;
             }
-            std::this_thread::sleep_for(200ms);
+            const auto hdr = [&](const char* k) -> std::string {
+                auto it = lease.headers.find(k);
+                return it == lease.headers.end() ? "" : it->second;
+            };
+            const std::string id = hdr("x-tautq-id");
+            const std::string url = hdr("x-tautq-url");
+            const std::string key = hdr("x-tautq-key");
+            const std::string epoch = hdr("x-tautq-epoch");
+            const std::string seq = hdr("x-tautq-seq");
+            if (id.empty() || url.empty()) {
+                continue;
+            }
+
+            const auto delivery = tautq::http_fetch(
+                "POST", url,
+                {{"Idempotency-Key", key}, {"X-Tautq-Attempt", hdr("x-tautq-attempt")}}, lease.body,
+                std::chrono::milliseconds(deliver_timeout_ms));
+            const bool ok = delivery.code >= 200 && delivery.code < 300;
+            if (!quiet) {
+                std::fprintf(stderr, "[worker %s] job=%s attempt=%s deliver=%d -> %s\n",
+                             worker_id.c_str(), id.c_str(), hdr("x-tautq-attempt").c_str(),
+                             delivery.code, ok ? "ok" : "fail");
+            }
+
+            // Report the outcome; 503 means the completion quorum is still forming — keep
+            // retrying, the ack path is idempotent.
+            const std::string ack_url = node + "/v1/ack?id=" + id + "&epoch=" + epoch +
+                                        "&seq=" + seq + "&result=" + (ok ? "ok" : "fail");
+            for (int attempt = 0; attempt < 50 && g_stop == 0; ++attempt) {
+                const auto ack = tautq::http_fetch("POST", ack_url, {}, "", 2000ms);
+                if (ack.code != 0 && ack.code != 503) {
+                    break;
+                }
+                std::this_thread::sleep_for(200ms);
+            }
         }
+    };
+    std::vector<std::thread> lanes;
+    for (int i = 1; i < concurrency; ++i) {
+        lanes.emplace_back(loop_fn, i);
+    }
+    loop_fn(0);
+    for (auto& t : lanes) {
+        t.join();
     }
     return 0;
 }
