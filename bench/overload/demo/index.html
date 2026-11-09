@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>tautq overload lab</title>
+<style>
+:root { --bg:#f7f5f0; --panel:#fff; --ink:#1d1d1b; --muted:#6b6862; --line:#e2ded5; --acc:#2f6f4f; --warn:#b4541f; --bad:#a3262a; --chip:#efece5; }
+@media (prefers-color-scheme: dark) { :root { --bg:#161614; --panel:#1f1f1c; --ink:#ecebe6; --muted:#a19d94; --line:#34332f; --acc:#6fbf8f; --warn:#e08a4f; --bad:#e0676b; --chip:#2a2926; } }
+* { box-sizing: border-box; }
+body { margin:0; background:var(--bg); color:var(--ink); font:14px/1.45 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+header { padding:16px; border-bottom:1px solid var(--line); display:flex; gap:16px; align-items:baseline; flex-wrap:wrap; }
+h1 { font-size:18px; margin:0; } .sub { color:var(--muted); }
+nav button { margin-right:6px; }
+main { padding:16px; max-width:1200px; margin:0 auto; }
+.grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap:12px; }
+.panel { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:12px; }
+.panel h2 { font-size:13px; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); margin:0 0 8px; }
+label { display:block; margin:6px 0 2px; color:var(--muted); font-size:12px; }
+input[type=number], select, input[type=text] { width:100%; padding:6px; border:1px solid var(--line); border-radius:6px; background:var(--bg); color:var(--ink); }
+button { padding:6px 10px; border:1px solid var(--line); border-radius:6px; background:var(--chip); color:var(--ink); cursor:pointer; }
+button.primary { background:var(--acc); color:#fff; border-color:var(--acc); }
+button:disabled { opacity:.5; cursor:not-allowed; }
+.kpis { display:grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap:8px; }
+.kpi { background:var(--chip); border-radius:6px; padding:8px; } .kpi b { display:block; font-size:20px; } .kpi span { color:var(--muted); font-size:12px; }
+.nodes { display:grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap:8px; }
+.node { border:1px solid var(--line); border-radius:6px; padding:8px; font-variant-numeric: tabular-nums; }
+.node.dead { border-color:var(--bad); color:var(--muted); }
+.node .row { display:flex; justify-content:space-between; font-size:12px; }
+.node .actions { margin-top:6px; display:flex; gap:4px; flex-wrap:wrap; }
+.tag { display:inline-block; padding:1px 6px; border-radius:10px; font-size:11px; background:var(--chip); }
+.tag.shed { background:var(--warn); color:#fff; } .tag.bad { background:var(--bad); color:#fff; }
+pre { white-space:pre-wrap; word-break:break-word; background:var(--chip); padding:8px; border-radius:6px; font-size:12px; max-height:260px; overflow:auto; }
+table { border-collapse:collapse; width:100%; font-size:12px; font-variant-numeric: tabular-nums; }
+th, td { border-bottom:1px solid var(--line); padding:4px 6px; text-align:right; } th:first-child, td:first-child, th:nth-child(2), td:nth-child(2) { text-align:left; }
+.tablewrap { overflow-x:auto; }
+.banner { background:var(--warn); color:#fff; padding:6px 10px; border-radius:6px; margin-bottom:10px; font-weight:600; }
+.hidden { display:none; }
+.why { color:var(--muted); font-size:12px; margin-top:6px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>tautq overload lab</h1>
+  <span class="sub">Accept durably or refuse promptly, and keep delivering. Live numbers come from running processes.</span>
+  <nav><button id="tab-live" class="primary">Live</button><button id="tab-rec">Recorded run</button></nav>
+</header>
+<main>
+<section id="live">
+  <div class="grid">
+    <div class="panel">
+      <h2>1. Cluster</h2>
+      <label for="arm">Configuration (restarts a fresh 5-node cluster)</label>
+      <select id="arm">
+        <option value="both">group commit + admission</option>
+        <option value="batch">group commit only</option>
+        <option value="admission">admission only (fsync per record)</option>
+        <option value="unbatched">unbatched (fsync per record, no admission)</option>
+      </select>
+      <div style="margin-top:8px;display:flex;gap:6px"><button class="primary" id="up">Start cluster</button><button id="down">Stop</button></div>
+      <div class="why" id="armdesc"></div>
+    </div>
+    <div class="panel">
+      <h2>2. Offered load (open loop)</h2>
+      <label for="rate">Submits per second (max 8000)</label><input id="rate" type="number" value="3000" min="1" max="8000">
+      <label for="secs">Duration seconds (max 20)</label><input id="secs" type="number" value="10" min="1" max="20">
+      <div style="margin-top:8px"><button class="primary" id="go">Send load</button></div>
+      <div class="why">Poisson arrivals on a fixed schedule; latency is measured from each request's intended send time, so a slow server cannot hide its own queueing.</div>
+    </div>
+    <div class="panel">
+      <h2>3. Receiver faults</h2>
+      <label for="stall">Webhook receiver stall, ms (max 2000)</label><input id="stall" type="number" value="0" min="0" max="2000">
+      <label for="fail">Receiver 500 rate (0 to 0.9)</label><input id="fail" type="number" value="0" step="0.05" min="0" max="0.9">
+      <div style="margin-top:8px"><button id="sinkset">Apply</button></div>
+    </div>
+    <div class="panel">
+      <h2>4. Check the contract</h2>
+      <button class="primary" id="verify">Verify WAL snapshot</button>
+      <label for="key">Inspect an accepted key</label><input id="key" type="text" placeholder="e.g. demo1t12345-17">
+      <div style="margin-top:6px"><button id="inspect">Look up job</button></div>
+      <pre id="out">Results appear here.</pre>
+    </div>
+  </div>
+
+  <div class="panel" style="margin-top:12px">
+    <h2>Client view of the last load run</h2>
+    <div class="kpis" id="kpis"></div>
+    <div class="why">accepted = 2xx (durable on the owner and one replica before the reply); refused = 429 before any id or log write (definitely not accepted, retry later); unknown = 503/timeout after retries with the same key.</div>
+  </div>
+
+  <div class="panel" style="margin-top:12px">
+    <h2>Nodes (live /v1/stats)</h2>
+    <div class="nodes" id="nodes"></div>
+  </div>
+
+  <div class="panel" style="margin-top:12px">
+    <h2>Events</h2><pre id="events"></pre>
+  </div>
+</section>
+
+<section id="recorded" class="hidden">
+  <div class="banner">RECORDED RUN: these rows are saved results from the finished campaign, not live execution.</div>
+  <div class="panel"><div class="why" id="recsrc"></div><div class="tablewrap"><table id="rectable"></table></div></div>
+</section>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+const api = async (path, method = "GET") => (await fetch(path, { method })).json();
+const fmt = (v, d = 0) => v === null || v === undefined ? "-" : Number(v).toFixed(d);
+const show = (o) => { $("out").textContent = typeof o === "string" ? o : JSON.stringify(o, null, 2); };
+
+$("tab-live").onclick = () => { $("live").classList.remove("hidden"); $("recorded").classList.add("hidden"); $("tab-live").classList.add("primary"); $("tab-rec").classList.remove("primary"); };
+$("tab-rec").onclick = async () => {
+  $("recorded").classList.remove("hidden"); $("live").classList.add("hidden"); $("tab-rec").classList.add("primary"); $("tab-live").classList.remove("primary");
+  const r = await api("/api/recorded");
+  $("recsrc").textContent = r.source ? `Source: ${r.source} (${r.runs.length} runs)` : "No recorded campaign directory was given (--recorded).";
+  const rows = r.runs.sort((a, b) => (a.profile + a.arm + a.seed).localeCompare(b.profile + b.arm + b.seed));
+  let h = "<tr><th>profile</th><th>arm</th><th>seed</th><th>offered</th><th>accepted</th><th>refused</th><th>goodput/s</th><th>ack p99 ms</th><th>refusal p99 ms</th><th>e2e p99 ms</th><th>max queue</th><th>undelivered after drain</th><th>verify</th></tr>";
+  for (const x of rows) {
+    h += `<tr><td>${x.profile}</td><td>${x.arm}</td><td>${x.seed}</td><td>${x.offered}</td><td>${x.accepted}</td><td>${(x.outcomes || {}).refused || 0}</td><td>${fmt(x.goodput_per_s)}</td><td>${fmt(x.ack_ms && x.ack_ms.p99, 1)}</td><td>${fmt(x.refusal_ms && x.refusal_ms.p99, 1)}</td><td>${fmt(x.e2e_ms && x.e2e_ms.p99)}</td><td>${fmt(x.queue_depth && x.queue_depth.max)}</td><td>${x.undelivered_after_drain}</td><td>${x.verify && x.verify.pass ? "PASS" : "FAIL"}</td></tr>`;
+  }
+  $("rectable").innerHTML = h;
+};
+
+$("up").onclick = async () => { $("up").disabled = true; show("starting cluster..."); show(await api(`/api/cluster?action=up&arm=${$("arm").value}`, "POST")); $("up").disabled = false; };
+$("down").onclick = async () => show(await api("/api/cluster?action=down", "POST"));
+$("go").onclick = async () => show(await api(`/api/load?rate=${$("rate").value}&seconds=${$("secs").value}`, "POST"));
+$("sinkset").onclick = async () => show(await api(`/api/sink?stall_ms=${$("stall").value}&fail_rate=${$("fail").value}`, "POST"));
+$("verify").onclick = async () => { show("verifying a copy of every WAL..."); const r = await api("/api/verify", "POST"); show((r.stdout || "") + (r.stderr || "") + "\n" + (r.note || r.error || "")); };
+$("inspect").onclick = async () => show(await api(`/api/job?key=${encodeURIComponent($("key").value)}`));
+
+const node = async (i, a) => show(await api(`/api/node?i=${i}&action=${a}`, "POST"));
+window.node = node;
+
+async function tick() {
+  let s;
+  try { s = await api("/api/state"); } catch (e) { return; }
+  if (s.arms && s.arm) $("armdesc").textContent = `running: ${s.arm} (node flags: ${s.arms[s.arm]})`;
+  else $("armdesc").textContent = "no cluster running";
+  const l = s.load, d = s.delivered;
+  const k = [];
+  if (l) {
+    k.push(["offered so far", l.keys_answered], ["accepted", l.accepted], ["refused 429", l.refused_429], ["unknown/unavailable", l.unknown_or_unavailable],
+           ["client saturated", l.client_saturated], ["ack p99 ms", fmt(l.ack_ms_p99, 1)], ["refusal p99 ms", fmt(l.refusal_ms_p99, 1)], [l.running ? "running s" : "finished after s", l.elapsed]);
+  }
+  if (d) k.push(["accepted delivered", `${d.accepted_delivered} / ${d.accepted_total}`]);
+  if (s.sink) k.push(["receiver 2xx logged", s.sink.received], ["receiver 500s", s.sink.failed]);
+  $("kpis").innerHTML = k.map(([a, b]) => `<div class="kpi"><b>${b}</b><span>${a}</span></div>`).join("") || "<span class='why'>No load sent yet.</span>";
+  $("nodes").innerHTML = (s.nodes || []).map((n, i) => {
+    if (!n) return `<div class="node dead"><b>node ${i}</b> <span class="tag bad">down</span><div class="actions"><button onclick="node(${i},'start')">restart</button></div></div>`;
+    const row = (a, b) => `<div class="row"><span>${a}</span><span>${b}</span></div>`;
+    return `<div class="node"><b>node ${i}</b> ${n.shedding ? '<span class="tag shed">shedding</span>' : ""} ${n.poisoned ? '<span class="tag bad">WAL poisoned</span>' : ""}` +
+      row("owned backlog", fmt(n.owned_backlog)) + row("in-flight submits", fmt(n.inflight_submits)) + row("WAL pending", fmt(n.pending_records)) +
+      row("durable lsn / next", `${fmt(n.durable_lsn)} / ${fmt(n.next_lsn)}`) + row("fsyncs", fmt(n.flushes)) + row("records / fsync", n.flushes ? fmt(n.records_committed / n.flushes, 1) : "-") +
+      row("last / max batch", `${fmt(n.last_batch)} / ${fmt(n.max_batch)}`) + row("flush ms mean / max", `${fmt(n.flush_ms_mean, 2)} / ${fmt(n.flush_ms_max, 1)}`) +
+      row("admitted", fmt(n.admitted)) + row("refused (backlog/inflight/gw)", `${fmt(n.refused_backlog)}/${fmt(n.refused_inflight)}/${fmt(n.refused_gateway)}`) +
+      row("unknown outcome", fmt(n.unknown)) + row("completions", fmt(n.completions_ok)) + row("repair backlog", fmt(n.repair_backlog)) +
+      `<div class="actions"><button onclick="node(${i},'kill')">SIGKILL</button><button onclick="node(${i},'drain')">drain</button></div></div>`;
+  }).join("");
+  $("events").textContent = (s.events || []).map(e => e.join("  ")).join("\n");
+}
+setInterval(tick, 1000); tick();
+</script>
+</body>
+</html>

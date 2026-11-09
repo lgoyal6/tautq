@@ -163,6 +163,27 @@ curl -X POST 'http://localhost:8080/v1/jobs?key=order-42&url=http://172.28.0.9:8
 curl http://localhost:8080/v1/jobs/<id>
 ```
 
+### Group commit and overload control
+
+Durability is a node-local barrier: records append behind it, one fsync covers the batch,
+and only then are they applied and acknowledged (replicas included). `--max-batch 1` keeps
+the old fsync-per-record path. `--admission` bounds unique submits per owner (in-flight,
+bytes, owned backlog, WAL share, with hysteresis): over the limit a submit gets HTTP 429
+before any id or log write, while duplicate keys still resolve to their original id. A
+failed fsync answers HTTP 503 `durability_unknown` (retry with the same key), never a false
+"not accepted". The invariants are in `docs/DESIGN-protocol.md` (2026-11-04 notes).
+
+```bash
+tautq-node ... --max-batch 256 --admission --max-backlog 1000   # flags; see node_main.cc
+curl http://localhost:8080/v1/stats                              # barrier + admission gauges
+# Four-arm study (Linux, root): baseline vs batching vs admission vs both
+python3 bench/overload/study.py campaign --protocol protocol.json --out runs/
+python3 bench/overload/report.py --campaign runs/ --protocol protocol.json \
+        --out-json summary.json --out-md table.md
+python3 bench/overload/crash_campaign.py --out crash/              # real SIGKILL/EIO/ENOSPC cases
+python3 bench/overload/demo.py --bin build/release --port 8707     # live overload lab
+```
+
 ## Honest limitations
 
 - **f = 1.** A job is durable on 2 of 3 nodes at ack time; two simultaneous failures
@@ -181,6 +202,13 @@ curl http://localhost:8080/v1/jobs/<id>
   is unavailable, gateways refuse the submit with a retryable 503 instead of creating a
   second job elsewhere. This favors duplicate prevention over availability until the owner
   returns. Adding or removing configured members still requires a coordinated migration.
+- **The event loop is single-threaded and fsyncs inline.** Group commit amortizes the
+  fsync, but while it runs the node serves nothing else; there is no fsync/append overlap.
+  Admission refusals are prompt only while the loop is responsive, so admission alone
+  cannot rescue an fsync-per-record node at overload.
+- **Ownership skew.** Key ownership follows the ring without virtual nodes and workers lease
+  only from their local node, so an owner with a larger arc saturates first; admission
+  limits are per owner.
 - Quorum-failed lease attempts consume `lease_seq` (never double-grants, but repeated
   quorum failure can dead-letter a job that never ran; the membership gate + backoff make
   this need ~5 separate partitions to happen).
@@ -189,10 +217,12 @@ curl http://localhost:8080/v1/jobs/<id>
 
 ```
 src/        wire codec, demux, RPC, WAL, job store, ring, queue protocol, HTTP, metrics,
-            binaries: tautq-node / tautq-worker / tautq-sink / tautq-verify / tautq-loadgen
-tests/      48 unit/protocol tests over taut's deterministic SimNet (ASan/UBSan)
+            binaries: tautq-node / tautq-worker / tautq-sink / tautq-verify / tautq-loadgen /
+            tautq-bench (open-loop, per-request raw records), faults (crashpoints, IO faults)
+tests/      99 unit/protocol/crash tests: SimNet clusters, WAL fault + power-loss oracle, forked SIGKILL matrix (ASan/UBSan)
 chaos/      netns cluster harness + the 4-scenario matrix
-bench/      load ramp + loss matrix scripts and their CSVs
+bench/      load ramp + loss matrix scripts and their CSVs; overload/ = four-arm study,
+            report generator, real-process crash campaign, live demo
 deploy/     Dockerfile, docker-compose, Prometheus config, Grafana dashboard
 docs/       DESIGN-protocol.md (the approved protocol), DECISIONS.md
 ```
